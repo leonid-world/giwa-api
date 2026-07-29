@@ -1,0 +1,93 @@
+CREATE TABLE companies (
+    company_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    company_name VARCHAR(200) NOT NULL,
+    business_number VARCHAR(30) NOT NULL UNIQUE,
+    representative_name VARCHAR(100),
+    company_status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE users (
+    user_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    user_name VARCHAR(100) NOT NULL,
+    phone VARCHAR(30),
+    company_id BIGINT NOT NULL,
+    status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE',
+    last_login_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (company_id) REFERENCES companies(company_id)
+);
+
+CREATE TABLE company_wallets (
+    company_wallet_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    company_id BIGINT NOT NULL,
+    wallet_address VARCHAR(42) NOT NULL UNIQUE,
+    chain_id BIGINT NOT NULL,
+    wallet_type VARCHAR(30) NOT NULL DEFAULT 'METAMASK',
+    is_primary BOOLEAN NOT NULL DEFAULT TRUE,
+    is_verified BOOLEAN NOT NULL DEFAULT FALSE,
+    verified_at TIMESTAMP,
+    connected_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    disconnected_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (company_id) REFERENCES companies(company_id)
+);
+
+CREATE TABLE receivables (
+    receivable_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    seller_company_id BIGINT NOT NULL,
+    buyer_company_id BIGINT NOT NULL,
+    funder_company_id BIGINT,
+    seller_wallet_address VARCHAR(42) NOT NULL,
+    buyer_wallet_address VARCHAR(42) NOT NULL,
+    funder_wallet_address VARCHAR(42),
+    currency_code VARCHAR(10) NOT NULL DEFAULT 'KRW',
+    face_value DECIMAL(36, 0) NOT NULL,
+    funding_amount DECIMAL(36, 0) NOT NULL,
+    issue_date DATE NOT NULL,
+    maturity_date DATE NOT NULL,
+    status VARCHAR(30) NOT NULL DEFAULT 'CREATED',
+    document_hash VARCHAR(66),
+    onchain_receivable_id BIGINT,
+    token_id BIGINT,
+    contract_address VARCHAR(42),
+    mock_token_address VARCHAR(42),
+    create_tx_hash VARCHAR(66),
+    verify_tx_hash VARCHAR(66),
+    tokenize_tx_hash VARCHAR(66),
+    funding_tx_hash VARCHAR(66),
+    repay_tx_hash VARCHAR(66),
+    description VARCHAR(1000),
+    created_by BIGINT NOT NULL,
+    updated_by BIGINT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (seller_company_id) REFERENCES companies(company_id),
+    FOREIGN KEY (buyer_company_id) REFERENCES companies(company_id),
+    FOREIGN KEY (funder_company_id) REFERENCES companies(company_id),
+    FOREIGN KEY (created_by) REFERENCES users(user_id),
+    FOREIGN KEY (updated_by) REFERENCES users(user_id),
+    CHECK (seller_company_id <> buyer_company_id),
+    CHECK (face_value > 0),
+    CHECK (funding_amount > 0 AND funding_amount <= face_value),
+    CHECK (maturity_date > issue_date)
+);
+
+CREATE TABLE receivable_status_history (
+    receivable_status_history_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    receivable_id BIGINT NOT NULL,
+    previous_status VARCHAR(30),
+    current_status VARCHAR(30) NOT NULL,
+    changed_by_company_id BIGINT,
+    changed_by_wallet_address VARCHAR(42),
+    tx_hash VARCHAR(66),
+    change_reason VARCHAR(500),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (receivable_id) REFERENCES receivables(receivable_id),
+    FOREIGN KEY (changed_by_company_id) REFERENCES companies(company_id)
+);
