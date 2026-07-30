@@ -39,10 +39,10 @@ class ReceivableServiceIntegrationTests {
         String sellerEmail = "receivable-seller@example.com";
         String buyerEmail = "receivable-buyer@example.com";
         authService.signup(new SignupRequest(
-                sellerEmail, "password123", "Seller User", "Seller Company", "111-11-11111"
+                sellerEmail, "password123", "Seller User", "Seller Company", "1111111111"
         ));
         authService.signup(new SignupRequest(
-                buyerEmail, "password123", "Buyer User", "Buyer Company", "222-22-22222"
+                buyerEmail, "password123", "Buyer User", "Buyer Company", "2222222222"
         ));
         walletService.connect(sellerEmail, new WalletConnectRequest(
                 "0x1111111111111111111111111111111111111111", 1337L
@@ -52,7 +52,7 @@ class ReceivableServiceIntegrationTests {
         ));
 
         ReceivableResponse created = receivableService.create(sellerEmail, new ReceivableCreateRequest(
-                "222-22-22222",
+                "2222222222",
                 new BigDecimal("1000000000000000000"),
                 new BigDecimal("900000000000000000"),
                 LocalDate.of(2026, 7, 29),
@@ -78,7 +78,7 @@ class ReceivableServiceIntegrationTests {
 
         String outsiderEmail = "receivable-outsider@example.com";
         authService.signup(new SignupRequest(
-                outsiderEmail, "password123", "Outsider User", "Outsider Company", "333-33-33333"
+                outsiderEmail, "password123", "Outsider User", "Outsider Company", "3333333333"
         ));
         assertThat(receivableService.getAll(outsiderEmail)).isEmpty();
         assertThatThrownBy(() -> receivableService.getById(outsiderEmail, created.getReceivableId()))

@@ -25,7 +25,9 @@ public class ReceivableResponse {
     private LocalDate maturityDate;
     private String status;
     private String documentHash;
+    @JsonFormat(shape = JsonFormat.Shape.STRING)
     private Long onchainReceivableId;
+    @JsonFormat(shape = JsonFormat.Shape.STRING)
     private Long tokenId;
     private String contractAddress;
     private String mockTokenAddress;

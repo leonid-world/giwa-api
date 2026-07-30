@@ -44,4 +44,22 @@ public class ReceivableController {
     ) {
         return receivableService.getById(email, receivableId);
     }
+
+    @PostMapping("/{receivableId}/chain-created")
+    public ReceivableResponse markChainCreated(
+            @AuthenticationPrincipal String email,
+            @PathVariable Long receivableId,
+            @Valid @RequestBody ReceivableChainCreatedRequest request
+    ) {
+        return receivableService.markChainCreated(email, receivableId, request);
+    }
+
+    @PostMapping("/{receivableId}/verified")
+    public ReceivableResponse markVerified(
+            @AuthenticationPrincipal String email,
+            @PathVariable Long receivableId,
+            @Valid @RequestBody ReceivableVerifiedRequest request
+    ) {
+        return receivableService.markVerified(email, receivableId, request);
+    }
 }

@@ -22,7 +22,7 @@ class WalletServiceIntegrationTests {
     @Test
     void mapsMetaMaskAddressToSignedInUsersCompany() {
         String email = "wallet-test@example.com";
-        authService.signup(new SignupRequest(email, "password123", "Wallet Tester", "Wallet Test Company", "123-45-67890"));
+        authService.signup(new SignupRequest(email, "password123", "Wallet Tester", "Wallet Test Company", "1234567890"));
 
         WalletResponse connected = walletService.connect(email,
                 new WalletConnectRequest("0x1234567890123456789012345678901234567890", 1337L));

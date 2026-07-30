@@ -1,7 +1,7 @@
 CREATE TABLE companies (
     company_id BIGINT AUTO_INCREMENT PRIMARY KEY,
     company_name VARCHAR(200) NOT NULL,
-    business_number VARCHAR(30) NOT NULL UNIQUE,
+    business_number CHAR(10) NOT NULL UNIQUE,
     representative_name VARCHAR(100),
     company_status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -72,6 +72,9 @@ CREATE TABLE receivables (
     FOREIGN KEY (funder_company_id) REFERENCES companies(company_id),
     FOREIGN KEY (created_by) REFERENCES users(user_id),
     FOREIGN KEY (updated_by) REFERENCES users(user_id),
+    UNIQUE (contract_address, onchain_receivable_id),
+    UNIQUE (create_tx_hash),
+    UNIQUE (verify_tx_hash),
     CHECK (seller_company_id <> buyer_company_id),
     CHECK (face_value > 0),
     CHECK (funding_amount > 0 AND funding_amount <= face_value),

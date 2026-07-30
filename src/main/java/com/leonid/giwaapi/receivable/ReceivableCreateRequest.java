@@ -11,7 +11,8 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 
 public record ReceivableCreateRequest(
-        @NotBlank @Size(max = 30) String buyerBusinessNumber,
+        @NotBlank @Pattern(regexp = "\\d{10}", message = "Buyer business number must contain exactly 10 digits")
+        String buyerBusinessNumber,
         @NotNull @Positive @Digits(integer = 36, fraction = 0) BigDecimal faceValue,
         @NotNull @Positive @Digits(integer = 36, fraction = 0) BigDecimal fundingAmount,
         @NotNull LocalDate issueDate,

@@ -5,6 +5,7 @@ import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Options;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
 
 import java.util.List;
 import java.util.Optional;
@@ -85,6 +86,78 @@ public interface ReceivableMapper {
             @Param("companyId") Long companyId
     );
 
+    @Select(RESPONSE_SELECT + """
+            WHERE r.receivable_id = #{receivableId}
+            """)
+    @Options(useCache = false, flushCache = Options.FlushCachePolicy.TRUE)
+    Optional<ReceivableResponse> findById(Long receivableId);
+
+    @Update("""
+            UPDATE receivables
+               SET onchain_receivable_id = #{onchainReceivableId},
+                   contract_address = #{contractAddress},
+                   create_tx_hash = #{txHash},
+                   updated_by = #{userId}
+             WHERE receivable_id = #{receivableId}
+               AND seller_company_id = #{companyId}
+               AND status = 'CREATED'
+               AND onchain_receivable_id IS NULL
+               AND contract_address IS NULL
+               AND create_tx_hash IS NULL
+            """)
+    int markChainCreated(
+            @Param("receivableId") Long receivableId,
+            @Param("companyId") Long companyId,
+            @Param("userId") Long userId,
+            @Param("onchainReceivableId") Long onchainReceivableId,
+            @Param("contractAddress") String contractAddress,
+            @Param("txHash") String txHash
+    );
+
+    @Select("""
+            SELECT COUNT(*)
+              FROM receivables
+             WHERE receivable_id <> #{receivableId}
+               AND contract_address = #{contractAddress}
+               AND onchain_receivable_id = #{onchainReceivableId}
+            """)
+    int countChainIdentityUsedByOther(
+            @Param("receivableId") Long receivableId,
+            @Param("onchainReceivableId") Long onchainReceivableId,
+            @Param("contractAddress") String contractAddress
+    );
+
+    @Update("""
+            UPDATE receivables
+               SET status = 'VERIFIED',
+                   verify_tx_hash = #{txHash},
+                   updated_by = #{userId}
+             WHERE receivable_id = #{receivableId}
+               AND buyer_company_id = #{companyId}
+               AND status = 'CREATED'
+               AND onchain_receivable_id IS NOT NULL
+               AND contract_address IS NOT NULL
+               AND create_tx_hash IS NOT NULL
+               AND verify_tx_hash IS NULL
+            """)
+    int markVerified(
+            @Param("receivableId") Long receivableId,
+            @Param("companyId") Long companyId,
+            @Param("userId") Long userId,
+            @Param("txHash") String txHash
+    );
+
+    @Select("""
+            SELECT COUNT(*)
+              FROM receivables
+             WHERE create_tx_hash = #{txHash}
+                OR verify_tx_hash = #{txHash}
+                OR tokenize_tx_hash = #{txHash}
+                OR funding_tx_hash = #{txHash}
+                OR repay_tx_hash = #{txHash}
+            """)
+    int countTransactionHashUsage(@Param("txHash") String txHash);
+
     @Insert("""
             INSERT INTO receivable_status_history (
                 receivable_id, previous_status, current_status,
@@ -98,5 +171,23 @@ public interface ReceivableMapper {
             @Param("receivableId") Long receivableId,
             @Param("companyId") Long companyId,
             @Param("walletAddress") String walletAddress
+    );
+
+    @Insert("""
+            INSERT INTO receivable_status_history (
+                receivable_id, previous_status, current_status,
+                changed_by_company_id, changed_by_wallet_address,
+                tx_hash, change_reason
+            ) VALUES (
+                #{receivableId}, 'CREATED', 'VERIFIED',
+                #{companyId}, #{walletAddress},
+                #{txHash}, 'Buyer verified receivable onchain'
+            )
+            """)
+    void insertVerifiedHistory(
+            @Param("receivableId") Long receivableId,
+            @Param("companyId") Long companyId,
+            @Param("walletAddress") String walletAddress,
+            @Param("txHash") String txHash
     );
 }

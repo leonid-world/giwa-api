@@ -2,6 +2,8 @@ package com.leonid.giwaapi.wallet;
 
 import com.leonid.giwaapi.auth.User;
 import com.leonid.giwaapi.auth.UserMapper;
+import com.leonid.giwaapi.common.error.ApiException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -26,14 +28,23 @@ public class WalletService {
         String walletAddress = request.walletAddress().toLowerCase(Locale.ROOT);
         Wallet addressOwner = walletMapper.findByWalletAddress(walletAddress).orElse(null);
         if (addressOwner != null && !addressOwner.companyId().equals(user.companyId())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Wallet is already mapped to another company");
+            throw walletAlreadyMapped();
         }
 
         Wallet currentWallet = walletMapper.findByCompanyId(user.companyId()).orElse(null);
-        if (currentWallet == null) {
-            walletMapper.insert(new Wallet(null, user.companyId(), walletAddress, request.chainId()));
-        } else if (!currentWallet.walletAddress().equals(walletAddress)) {
-            walletMapper.update(new Wallet(currentWallet.companyWalletId(), user.companyId(), walletAddress, request.chainId()));
+        try {
+            if (currentWallet == null) {
+                walletMapper.insert(new Wallet(null, user.companyId(), walletAddress, request.chainId()));
+            } else if (!currentWallet.walletAddress().equals(walletAddress)) {
+                walletMapper.update(new Wallet(
+                        currentWallet.companyWalletId(),
+                        user.companyId(),
+                        walletAddress,
+                        request.chainId()
+                ));
+            }
+        } catch (DataIntegrityViolationException exception) {
+            throw walletAlreadyMapped();
         }
         return new WalletResponse(walletAddress);
     }
@@ -48,5 +59,13 @@ public class WalletService {
     private User findUser(String email) {
         return userMapper.findByEmail(email)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED));
+    }
+
+    private ApiException walletAlreadyMapped() {
+        return new ApiException(
+                HttpStatus.CONFLICT,
+                "WALLET_ALREADY_MAPPED",
+                "이미 다른 회사에 등록된 MetaMask 지갑입니다. 다른 MetaMask 계정을 선택해 주세요."
+        );
     }
 }
