@@ -7,15 +7,14 @@ spring:
       mode: never
 
   datasource:
-#    url: ${DB_URL:jdbc:log4jdbc:mysql://localhost:3306/giwa_receivable?serverTimezone=Asia/Seoul}
-    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:giwa_receivable}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Seoul&characterEncoding=UTF-8
-#    driver-class-name: net.sf.log4jdbc.sql.jdbcapi.DriverSpy
+    url: "jdbc:mysql://${DB_HOST:${MYSQLHOST:localhost}}:${DB_PORT:${MYSQLPORT:3306}}/${DB_NAME:${MYSQLDATABASE:giwa_receivable}}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Seoul&characterEncoding=UTF-8"
     driver-class-name: com.mysql.cj.jdbc.Driver
-    username: ${DB_USERNAME:root}
-    password: ${DB_PASSWORD:}
+    username: ${DB_USERNAME:${MYSQLUSER:root}}
+    password: ${DB_PASSWORD:${MYSQLPASSWORD:}}
 
 server:
-  port: ${SERVER_PORT:8080}
+  address: 0.0.0.0
+  port: ${PORT:${SERVER_PORT:8080}}
 
 mybatis:
   mapper-locations: classpath:/mapper/**/*.xml
@@ -25,3 +24,7 @@ mybatis:
 jwt:
   secret: ${JWT_SECRET:local-mvp-jwt-secret-key-must-be-long-enough}
   expiration-ms: ${JWT_EXPIRATION_MS:86400000}
+
+app:
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173}
