@@ -5,6 +5,8 @@ import com.leonid.giwaapi.auth.UserMapper;
 import com.leonid.giwaapi.common.error.ApiException;
 import com.leonid.giwaapi.company.Company;
 import com.leonid.giwaapi.company.CompanyMapper;
+import com.leonid.giwaapi.transaction.BlockchainTransactionResponse;
+import com.leonid.giwaapi.transaction.BlockchainTransactionService;
 import com.leonid.giwaapi.wallet.Wallet;
 import com.leonid.giwaapi.wallet.WalletMapper;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -24,17 +26,20 @@ public class ReceivableService {
     private final CompanyMapper companyMapper;
     private final WalletMapper walletMapper;
     private final ReceivableMapper receivableMapper;
+    private final BlockchainTransactionService transactionService;
 
     public ReceivableService(
             UserMapper userMapper,
             CompanyMapper companyMapper,
             WalletMapper walletMapper,
-            ReceivableMapper receivableMapper
+            ReceivableMapper receivableMapper,
+            BlockchainTransactionService transactionService
     ) {
         this.userMapper = userMapper;
         this.companyMapper = companyMapper;
         this.walletMapper = walletMapper;
         this.receivableMapper = receivableMapper;
+        this.transactionService = transactionService;
     }
 
     @Transactional
@@ -122,6 +127,15 @@ public class ReceivableService {
                     "0 주소는 컨트랙트 주소로 사용할 수 없습니다."
             );
         }
+        transactionService.requireConfirmed(
+                receivableId,
+                user.companyId(),
+                "CREATE_RECEIVABLE",
+                receivable.getSellerWalletAddress(),
+                request.contractAddress(),
+                request.txHash(),
+                onchainReceivableId
+        );
         if (receivableMapper.countChainIdentityUsedByOther(
                 receivableId,
                 onchainReceivableId,
@@ -185,6 +199,15 @@ public class ReceivableService {
                     "Seller의 GIWA 온체인 채권 생성이 먼저 완료되어야 합니다."
             );
         }
+        transactionService.requireConfirmed(
+                receivableId,
+                user.companyId(),
+                "VERIFY_RECEIVABLE",
+                receivable.getBuyerWalletAddress(),
+                receivable.getContractAddress(),
+                request.txHash(),
+                receivable.getOnchainReceivableId()
+        );
         if (receivableMapper.countTransactionHashUsage(request.txHash()) > 0) {
             throw blockchainMetadataConflict();
         }
@@ -213,6 +236,102 @@ public class ReceivableService {
         ReceivableResponse latest = findReceivable(receivableId);
         if (equalsHex(latest.getVerifyTxHash(), request.txHash())) {
             return latest;
+        }
+        throw new ApiException(
+                HttpStatus.CONFLICT,
+                "RECEIVABLE_STATE_CONFLICT",
+                "채권 상태가 다른 요청에 의해 변경되었습니다. 새로고침 후 다시 확인해 주세요."
+        );
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public ReceivableResponse markTokenized(
+            String email,
+            Long receivableId,
+            ReceivableTokenizedRequest request
+    ) {
+        User user = findUser(email);
+        ReceivableResponse receivable = findReceivable(receivableId);
+        requireCompany(
+                user.companyId(),
+                receivable.getSellerCompanyId(),
+                "ONLY_SELLER",
+                "Seller 회사만 매출채권을 토큰화할 수 있습니다."
+        );
+
+        if (hasTokenizationMetadata(receivable)) {
+            if (receivable.getTokenId() != null
+                    && equalsHex(receivable.getTokenizeTxHash(), request.txHash())) {
+                return receivable;
+            }
+            throw blockchainMetadataConflict();
+        }
+        if (!"VERIFIED".equals(receivable.getStatus())) {
+            throw invalidStatus("VERIFIED", receivable.getStatus());
+        }
+        if (!hasCompleteVerifiedChainMetadata(receivable)) {
+            throw new ApiException(
+                    HttpStatus.CONFLICT,
+                    "RECEIVABLE_NOT_VERIFIED_ONCHAIN",
+                    "Buyer의 GIWA 온체인 검증이 먼저 완료되어야 합니다."
+            );
+        }
+
+        BlockchainTransactionResponse confirmedTransaction =
+                transactionService.requireConfirmed(
+                        receivableId,
+                        user.companyId(),
+                        "TOKENIZE_RECEIVABLE",
+                        receivable.getSellerWalletAddress(),
+                        receivable.getContractAddress(),
+                        request.txHash(),
+                        receivable.getOnchainReceivableId()
+                );
+        Long tokenId = confirmedTransaction.getEventTokenId();
+        if (tokenId == null || tokenId <= 0) {
+            throw new ApiException(
+                    HttpStatus.CONFLICT,
+                    "BLOCKCHAIN_SYNCHRONIZATION_EVENT_MISMATCH",
+                    "검증된 토큰화 이벤트의 토큰 ID를 확인할 수 없습니다."
+            );
+        }
+        String txHash = confirmedTransaction.getTxHash();
+        if (receivableMapper.countTokenIdentityUsedByOther(
+                receivableId,
+                receivable.getContractAddress(),
+                tokenId
+        ) > 0 || receivableMapper.countTransactionHashUsage(txHash) > 0) {
+            throw blockchainMetadataConflict();
+        }
+
+        int updated;
+        try {
+            updated = receivableMapper.markTokenized(
+                    receivableId,
+                    user.companyId(),
+                    user.userId(),
+                    tokenId,
+                    txHash
+            );
+        } catch (DataIntegrityViolationException exception) {
+            throw blockchainMetadataConflict();
+        }
+        if (updated == 1) {
+            receivableMapper.insertTokenizedHistory(
+                    receivableId,
+                    user.companyId(),
+                    receivable.getSellerWalletAddress(),
+                    txHash
+            );
+            return findReceivable(receivableId);
+        }
+
+        ReceivableResponse latest = findReceivable(receivableId);
+        if (sameTokenizationMetadata(latest, tokenId, txHash)) {
+            return latest;
+        }
+        if (hasTokenizationMetadata(latest)) {
+            throw blockchainMetadataConflict();
         }
         throw new ApiException(
                 HttpStatus.CONFLICT,
@@ -270,6 +389,16 @@ public class ReceivableService {
                 && receivable.getCreateTxHash() != null;
     }
 
+    private boolean hasCompleteVerifiedChainMetadata(ReceivableResponse receivable) {
+        return hasCompleteChainMetadata(receivable)
+                && receivable.getVerifyTxHash() != null;
+    }
+
+    private boolean hasTokenizationMetadata(ReceivableResponse receivable) {
+        return receivable.getTokenId() != null
+                || receivable.getTokenizeTxHash() != null;
+    }
+
     private boolean sameChainMetadata(
             ReceivableResponse receivable,
             Long onchainReceivableId,
@@ -282,6 +411,15 @@ public class ReceivableService {
 
     private boolean equalsHex(String first, String second) {
         return first != null && second != null && first.equalsIgnoreCase(second);
+    }
+
+    private boolean sameTokenizationMetadata(
+            ReceivableResponse receivable,
+            Long tokenId,
+            String txHash
+    ) {
+        return Objects.equals(receivable.getTokenId(), tokenId)
+                && equalsHex(receivable.getTokenizeTxHash(), txHash);
     }
 
     private boolean isZeroAddress(String address) {

@@ -81,6 +81,35 @@ CREATE TABLE receivables (
     CHECK (maturity_date > issue_date)
 );
 
+CREATE TABLE blockchain_transactions (
+    blockchain_transaction_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    receivable_id BIGINT,
+    company_id BIGINT NOT NULL,
+    wallet_address VARCHAR(42) NOT NULL,
+    transaction_type VARCHAR(40) NOT NULL,
+    chain_id BIGINT NOT NULL,
+    contract_address VARCHAR(42) NOT NULL,
+    function_name VARCHAR(100) NOT NULL,
+    tx_hash VARCHAR(66) NOT NULL UNIQUE,
+    block_number BIGINT,
+    block_hash VARCHAR(66),
+    tx_status VARCHAR(30) NOT NULL DEFAULT 'PENDING',
+    gas_used BIGINT,
+    effective_gas_price DECIMAL(65, 0),
+    event_receivable_id BIGINT,
+    event_token_id BIGINT,
+    rpc_verified_at TIMESTAMP,
+    verification_version BIGINT NOT NULL DEFAULT 0,
+    error_code VARCHAR(100),
+    error_message VARCHAR(2000),
+    submitted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    confirmed_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (receivable_id) REFERENCES receivables(receivable_id),
+    FOREIGN KEY (company_id) REFERENCES companies(company_id)
+);
+
 CREATE TABLE receivable_status_history (
     receivable_status_history_id BIGINT AUTO_INCREMENT PRIMARY KEY,
     receivable_id BIGINT NOT NULL,

@@ -10,6 +10,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.Locale;
+import java.util.Objects;
 
 @Service
 public class WalletService {
@@ -35,7 +36,8 @@ public class WalletService {
         try {
             if (currentWallet == null) {
                 walletMapper.insert(new Wallet(null, user.companyId(), walletAddress, request.chainId()));
-            } else if (!currentWallet.walletAddress().equals(walletAddress)) {
+            } else if (!currentWallet.walletAddress().equals(walletAddress)
+                    || !Objects.equals(currentWallet.chainId(), request.chainId())) {
                 walletMapper.update(new Wallet(
                         currentWallet.companyWalletId(),
                         user.companyId(),

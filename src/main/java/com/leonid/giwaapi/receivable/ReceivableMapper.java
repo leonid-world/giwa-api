@@ -147,6 +147,43 @@ public interface ReceivableMapper {
             @Param("txHash") String txHash
     );
 
+    @Update("""
+            UPDATE receivables
+               SET status = 'TOKENIZED',
+                   token_id = #{tokenId},
+                   tokenize_tx_hash = #{txHash},
+                   updated_by = #{userId}
+             WHERE receivable_id = #{receivableId}
+               AND seller_company_id = #{companyId}
+               AND status = 'VERIFIED'
+               AND onchain_receivable_id IS NOT NULL
+               AND contract_address IS NOT NULL
+               AND create_tx_hash IS NOT NULL
+               AND verify_tx_hash IS NOT NULL
+               AND token_id IS NULL
+               AND tokenize_tx_hash IS NULL
+            """)
+    int markTokenized(
+            @Param("receivableId") Long receivableId,
+            @Param("companyId") Long companyId,
+            @Param("userId") Long userId,
+            @Param("tokenId") Long tokenId,
+            @Param("txHash") String txHash
+    );
+
+    @Select("""
+            SELECT COUNT(*)
+              FROM receivables
+             WHERE receivable_id <> #{receivableId}
+               AND contract_address = #{contractAddress}
+               AND token_id = #{tokenId}
+            """)
+    int countTokenIdentityUsedByOther(
+            @Param("receivableId") Long receivableId,
+            @Param("contractAddress") String contractAddress,
+            @Param("tokenId") Long tokenId
+    );
+
     @Select("""
             SELECT COUNT(*)
               FROM receivables
@@ -185,6 +222,24 @@ public interface ReceivableMapper {
             )
             """)
     void insertVerifiedHistory(
+            @Param("receivableId") Long receivableId,
+            @Param("companyId") Long companyId,
+            @Param("walletAddress") String walletAddress,
+            @Param("txHash") String txHash
+    );
+
+    @Insert("""
+            INSERT INTO receivable_status_history (
+                receivable_id, previous_status, current_status,
+                changed_by_company_id, changed_by_wallet_address,
+                tx_hash, change_reason
+            ) VALUES (
+                #{receivableId}, 'VERIFIED', 'TOKENIZED',
+                #{companyId}, #{walletAddress},
+                #{txHash}, 'Seller tokenized receivable onchain'
+            )
+            """)
+    void insertTokenizedHistory(
             @Param("receivableId") Long receivableId,
             @Param("companyId") Long companyId,
             @Param("walletAddress") String walletAddress,

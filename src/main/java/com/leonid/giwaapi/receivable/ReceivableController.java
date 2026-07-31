@@ -62,4 +62,13 @@ public class ReceivableController {
     ) {
         return receivableService.markVerified(email, receivableId, request);
     }
+
+    @PostMapping("/{receivableId}/tokenized")
+    public ReceivableResponse markTokenized(
+            @AuthenticationPrincipal String email,
+            @PathVariable Long receivableId,
+            @Valid @RequestBody ReceivableTokenizedRequest request
+    ) {
+        return receivableService.markTokenized(email, receivableId, request);
+    }
 }
