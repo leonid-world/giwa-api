@@ -3,6 +3,7 @@ package com.leonid.giwaapi.receivable;
 import com.leonid.giwaapi.auth.AuthService;
 import com.leonid.giwaapi.auth.SignupRequest;
 import com.leonid.giwaapi.common.error.ApiException;
+import com.leonid.giwaapi.transaction.BlockchainRpcProperties;
 import com.leonid.giwaapi.transaction.BlockchainTransactionConfirmedRequest;
 import com.leonid.giwaapi.transaction.BlockchainTransactionCreateRequest;
 import com.leonid.giwaapi.transaction.BlockchainTransactionService;
@@ -36,14 +37,19 @@ class ReceivableOnchainServiceIntegrationTests {
 
     private static final String SELLER_EMAIL = "onchain-seller@example.com";
     private static final String BUYER_EMAIL = "onchain-buyer@example.com";
+    private static final String FUNDER_EMAIL = "onchain-funder@example.com";
     private static final String SELLER_WALLET = "0x1111111111111111111111111111111111111111";
     private static final String BUYER_WALLET = "0x2222222222222222222222222222222222222222";
+    private static final String FUNDER_WALLET = "0x6666666666666666666666666666666666666666";
     private static final String CONTRACT = "0x3333333333333333333333333333333333333333";
+    private static final String MOCK_KRW = "0x7777777777777777777777777777777777777777";
     private static final String CREATE_TX = "0x" + "a".repeat(64);
     private static final String VERIFY_TX = "0x" + "b".repeat(64);
     private static final String TOKENIZE_TX = "0x" + "d".repeat(64);
     private static final String OTHER_TOKENIZE_TX = "0x" + "e".repeat(64);
     private static final String MISSING_TOKEN_TX = "0x" + "f".repeat(64);
+    private static final String FUND_TX = "0x" + "6".repeat(64);
+    private static final String REPAY_TX = "0x" + "7".repeat(64);
     private static final Long TOKEN_ID = 9L;
 
     @Autowired
@@ -61,11 +67,15 @@ class ReceivableOnchainServiceIntegrationTests {
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
+    @Autowired
+    private BlockchainRpcProperties blockchainProperties;
+
     @MockitoBean
     private BlockchainTransactionVerifier transactionVerifier;
 
     @BeforeEach
     void stubRpcVerification() {
+        blockchainProperties.setMockKrwAddress(MOCK_KRW);
         when(transactionVerifier.verify(any(), any(), any()))
                 .thenAnswer(invocation -> {
                     com.leonid.giwaapi.transaction.BlockchainTransactionResponse transaction =
@@ -78,9 +88,13 @@ class ReceivableOnchainServiceIntegrationTests {
                         ) ? 2L : 1L;
                     }
                     Long eventTokenId =
-                            "TOKENIZE_RECEIVABLE".equals(
+                            ("TOKENIZE_RECEIVABLE".equals(
                                     transaction.getTransactionType()
-                            ) && !MISSING_TOKEN_TX.equals(transaction.getTxHash())
+                            ) || "FUND_RECEIVABLE".equals(
+                                    transaction.getTransactionType()
+                            ) || "REPAY_RECEIVABLE".equals(
+                                    transaction.getTransactionType()
+                            )) && !MISSING_TOKEN_TX.equals(transaction.getTxHash())
                                     ? TOKEN_ID
                                     : null;
                     return new VerifiedBlockchainTransaction(
@@ -639,6 +653,195 @@ class ReceivableOnchainServiceIntegrationTests {
         );
     }
 
+    @Test
+    void synchronizesThirdPartyFundingFromRpcProofIdempotently() {
+        ReceivableResponse tokenized = createTokenizedFixture();
+        confirmJournal(
+                FUNDER_EMAIL,
+                tokenized.getReceivableId(),
+                "FUND_RECEIVABLE",
+                FUND_TX
+        );
+
+        ReceivableResponse funded = receivableService.markFunded(
+                FUNDER_EMAIL,
+                tokenized.getReceivableId(),
+                new ReceivableFundedRequest(FUND_TX)
+        );
+        ReceivableResponse retried = receivableService.markFunded(
+                FUNDER_EMAIL,
+                tokenized.getReceivableId(),
+                new ReceivableFundedRequest(FUND_TX)
+        );
+
+        assertThat(funded.getStatus()).isEqualTo("FUNDED");
+        assertThat(funded.getFunderCompanyId())
+                .isEqualTo(authService.me(FUNDER_EMAIL).companyId());
+        assertThat(funded.getFunderCompanyName()).isEqualTo("Onchain Funder");
+        assertThat(funded.getFunderWalletAddress()).isEqualTo(FUNDER_WALLET);
+        assertThat(funded.getMockTokenAddress()).isEqualTo(MOCK_KRW);
+        assertThat(funded.getFundingTxHash()).isEqualTo(FUND_TX);
+        assertThat(retried.getFundingTxHash()).isEqualTo(FUND_TX);
+
+        Integer historyCount = jdbcTemplate.queryForObject(
+                """
+                SELECT COUNT(*)
+                  FROM receivable_status_history
+                 WHERE receivable_id = ?
+                   AND previous_status = 'TOKENIZED'
+                   AND current_status = 'FUNDED'
+                   AND changed_by_wallet_address = ?
+                   AND tx_hash = ?
+                """,
+                Integer.class,
+                tokenized.getReceivableId(),
+                FUNDER_WALLET,
+                FUND_TX
+        );
+        assertThat(historyCount).isEqualTo(1);
+    }
+
+    @Test
+    void rejectsRelatedPartyAndUnconfirmedFundingSynchronization() {
+        ReceivableResponse tokenized = createTokenizedFixture();
+
+        assertApiError(
+                () -> transactionService.create(
+                        SELLER_EMAIL,
+                        journalRequest(
+                                tokenized.getReceivableId(),
+                                "FUND_RECEIVABLE",
+                                FUND_TX
+                        )
+                ),
+                HttpStatus.FORBIDDEN,
+                "RELATED_PARTY_CANNOT_FUND"
+        );
+        assertApiError(
+                () -> receivableService.markFunded(
+                        BUYER_EMAIL,
+                        tokenized.getReceivableId(),
+                        new ReceivableFundedRequest(FUND_TX)
+                ),
+                HttpStatus.FORBIDDEN,
+                "RELATED_PARTY_CANNOT_FUND"
+        );
+        assertApiError(
+                () -> receivableService.markFunded(
+                        FUNDER_EMAIL,
+                        tokenized.getReceivableId(),
+                        new ReceivableFundedRequest(FUND_TX)
+                ),
+                HttpStatus.CONFLICT,
+                "BLOCKCHAIN_TRANSACTION_NOT_CONFIRMED"
+        );
+    }
+
+    @Test
+    void synchronizesBuyerRepaymentFromRpcProofIdempotently() {
+        ReceivableResponse funded = createFundedFixture();
+        confirmJournal(
+                BUYER_EMAIL,
+                funded.getReceivableId(),
+                "REPAY_RECEIVABLE",
+                REPAY_TX
+        );
+
+        ReceivableResponse repaid = receivableService.markRepaid(
+                BUYER_EMAIL,
+                funded.getReceivableId(),
+                new ReceivableRepaidRequest(REPAY_TX)
+        );
+        ReceivableResponse retried = receivableService.markRepaid(
+                BUYER_EMAIL,
+                funded.getReceivableId(),
+                new ReceivableRepaidRequest(REPAY_TX)
+        );
+
+        assertThat(repaid.getStatus()).isEqualTo("REPAID");
+        assertThat(repaid.getRepayTxHash()).isEqualTo(REPAY_TX);
+        assertThat(retried.getRepayTxHash()).isEqualTo(REPAY_TX);
+
+        Integer historyCount = jdbcTemplate.queryForObject(
+                """
+                SELECT COUNT(*)
+                  FROM receivable_status_history
+                 WHERE receivable_id = ?
+                   AND previous_status = 'FUNDED'
+                   AND current_status = 'REPAID'
+                   AND changed_by_company_id = ?
+                   AND changed_by_wallet_address = ?
+                   AND tx_hash = ?
+                """,
+                Integer.class,
+                funded.getReceivableId(),
+                authService.me(BUYER_EMAIL).companyId(),
+                BUYER_WALLET,
+                REPAY_TX
+        );
+        assertThat(historyCount).isEqualTo(1);
+    }
+
+    @Test
+    void enforcesBuyerFundedStateAndConfirmedRepaymentJournal() {
+        ReceivableResponse tokenized = createTokenizedFixture();
+
+        assertApiError(
+                () -> transactionService.create(
+                        BUYER_EMAIL,
+                        journalRequest(
+                                tokenized.getReceivableId(),
+                                "REPAY_RECEIVABLE",
+                                REPAY_TX
+                        )
+                ),
+                HttpStatus.CONFLICT,
+                "INVALID_RECEIVABLE_STATUS"
+        );
+
+        confirmJournal(
+                FUNDER_EMAIL,
+                tokenized.getReceivableId(),
+                "FUND_RECEIVABLE",
+                FUND_TX
+        );
+        ReceivableResponse funded = receivableService.markFunded(
+                FUNDER_EMAIL,
+                tokenized.getReceivableId(),
+                new ReceivableFundedRequest(FUND_TX)
+        );
+        assertApiError(
+                () -> transactionService.create(
+                        SELLER_EMAIL,
+                        journalRequest(
+                                funded.getReceivableId(),
+                                "REPAY_RECEIVABLE",
+                                REPAY_TX
+                        )
+                ),
+                HttpStatus.FORBIDDEN,
+                "ONLY_BUYER"
+        );
+        assertApiError(
+                () -> receivableService.markRepaid(
+                        FUNDER_EMAIL,
+                        funded.getReceivableId(),
+                        new ReceivableRepaidRequest(REPAY_TX)
+                ),
+                HttpStatus.FORBIDDEN,
+                "ONLY_BUYER"
+        );
+        assertApiError(
+                () -> receivableService.markRepaid(
+                        BUYER_EMAIL,
+                        funded.getReceivableId(),
+                        new ReceivableRepaidRequest(REPAY_TX)
+                ),
+                HttpStatus.CONFLICT,
+                "BLOCKCHAIN_TRANSACTION_NOT_CONFIRMED"
+        );
+    }
+
     private ReceivableResponse createFixture() {
         authService.signup(new SignupRequest(
                 SELLER_EMAIL,
@@ -654,8 +857,16 @@ class ReceivableOnchainServiceIntegrationTests {
                 "Onchain Buyer",
                 "5555555555"
         ));
+        authService.signup(new SignupRequest(
+                FUNDER_EMAIL,
+                "password123",
+                "Funder User",
+                "Onchain Funder",
+                "6666666666"
+        ));
         walletService.connect(SELLER_EMAIL, new WalletConnectRequest(SELLER_WALLET, 1337L));
         walletService.connect(BUYER_EMAIL, new WalletConnectRequest(BUYER_WALLET, 1337L));
+        walletService.connect(FUNDER_EMAIL, new WalletConnectRequest(FUNDER_WALLET, 1337L));
 
         return receivableService.create(SELLER_EMAIL, new ReceivableCreateRequest(
                 "5555555555",
@@ -695,6 +906,36 @@ class ReceivableOnchainServiceIntegrationTests {
                 BUYER_EMAIL,
                 chainCreated.getReceivableId(),
                 new ReceivableVerifiedRequest(VERIFY_TX)
+        );
+    }
+
+    private ReceivableResponse createTokenizedFixture() {
+        ReceivableResponse verified = createVerifiedFixture();
+        confirmJournal(
+                SELLER_EMAIL,
+                verified.getReceivableId(),
+                "TOKENIZE_RECEIVABLE",
+                TOKENIZE_TX
+        );
+        return receivableService.markTokenized(
+                SELLER_EMAIL,
+                verified.getReceivableId(),
+                new ReceivableTokenizedRequest(TOKENIZE_TX)
+        );
+    }
+
+    private ReceivableResponse createFundedFixture() {
+        ReceivableResponse tokenized = createTokenizedFixture();
+        confirmJournal(
+                FUNDER_EMAIL,
+                tokenized.getReceivableId(),
+                "FUND_RECEIVABLE",
+                FUND_TX
+        );
+        return receivableService.markFunded(
+                FUNDER_EMAIL,
+                tokenized.getReceivableId(),
+                new ReceivableFundedRequest(FUND_TX)
         );
     }
 

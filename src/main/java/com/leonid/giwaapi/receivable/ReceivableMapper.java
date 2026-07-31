@@ -20,6 +20,7 @@ public interface ReceivableMapper {
                    r.buyer_company_id,
                    buyer.company_name AS buyer_company_name,
                    r.funder_company_id,
+                   funder.company_name AS funder_company_name,
                    r.seller_wallet_address,
                    r.buyer_wallet_address,
                    r.funder_wallet_address,
@@ -45,6 +46,7 @@ public interface ReceivableMapper {
               FROM receivables r
               JOIN companies seller ON seller.company_id = r.seller_company_id
               JOIN companies buyer ON buyer.company_id = r.buyer_company_id
+              LEFT JOIN companies funder ON funder.company_id = r.funder_company_id
             """;
 
     @Insert("""
@@ -74,6 +76,34 @@ public interface ReceivableMapper {
     List<ReceivableResponse> findAllVisibleToCompany(Long companyId);
 
     @Select(RESPONSE_SELECT + """
+            WHERE r.status = 'TOKENIZED'
+              AND r.funder_company_id IS NULL
+              AND r.seller_company_id <> #{companyId}
+              AND r.buyer_company_id <> #{companyId}
+            ORDER BY r.created_at DESC, r.receivable_id DESC
+            """)
+    List<ReceivableResponse> findAllFundingOpportunities(Long companyId);
+
+    @Select(RESPONSE_SELECT + """
+            WHERE r.receivable_id = #{receivableId}
+              AND (
+                    r.seller_company_id = #{companyId}
+                 OR r.buyer_company_id = #{companyId}
+                 OR r.funder_company_id = #{companyId}
+                 OR (
+                        r.status = 'TOKENIZED'
+                    AND r.funder_company_id IS NULL
+                    AND r.seller_company_id <> #{companyId}
+                    AND r.buyer_company_id <> #{companyId}
+                 )
+              )
+            """)
+    Optional<ReceivableResponse> findVisibleById(
+            @Param("receivableId") Long receivableId,
+            @Param("companyId") Long companyId
+    );
+
+    @Select(RESPONSE_SELECT + """
             WHERE r.receivable_id = #{receivableId}
               AND (
                     r.seller_company_id = #{companyId}
@@ -81,7 +111,7 @@ public interface ReceivableMapper {
                  OR r.funder_company_id = #{companyId}
               )
             """)
-    Optional<ReceivableResponse> findVisibleById(
+    Optional<ReceivableResponse> findRelatedById(
             @Param("receivableId") Long receivableId,
             @Param("companyId") Long companyId
     );
@@ -171,6 +201,65 @@ public interface ReceivableMapper {
             @Param("txHash") String txHash
     );
 
+    @Update("""
+            UPDATE receivables
+               SET status = 'FUNDED',
+                   funder_company_id = #{companyId},
+                   funder_wallet_address = #{walletAddress},
+                   mock_token_address = #{mockTokenAddress},
+                   funding_tx_hash = #{txHash},
+                   updated_by = #{userId}
+             WHERE receivable_id = #{receivableId}
+               AND seller_company_id <> #{companyId}
+               AND buyer_company_id <> #{companyId}
+               AND status = 'TOKENIZED'
+               AND onchain_receivable_id IS NOT NULL
+               AND contract_address IS NOT NULL
+               AND create_tx_hash IS NOT NULL
+               AND verify_tx_hash IS NOT NULL
+               AND token_id IS NOT NULL
+               AND tokenize_tx_hash IS NOT NULL
+               AND funder_company_id IS NULL
+               AND funder_wallet_address IS NULL
+               AND mock_token_address IS NULL
+               AND funding_tx_hash IS NULL
+            """)
+    int markFunded(
+            @Param("receivableId") Long receivableId,
+            @Param("companyId") Long companyId,
+            @Param("userId") Long userId,
+            @Param("walletAddress") String walletAddress,
+            @Param("mockTokenAddress") String mockTokenAddress,
+            @Param("txHash") String txHash
+    );
+
+    @Update("""
+            UPDATE receivables
+               SET status = 'REPAID',
+                   repay_tx_hash = #{txHash},
+                   updated_by = #{userId}
+             WHERE receivable_id = #{receivableId}
+               AND buyer_company_id = #{companyId}
+               AND status = 'FUNDED'
+               AND onchain_receivable_id IS NOT NULL
+               AND contract_address IS NOT NULL
+               AND create_tx_hash IS NOT NULL
+               AND verify_tx_hash IS NOT NULL
+               AND token_id IS NOT NULL
+               AND tokenize_tx_hash IS NOT NULL
+               AND funder_company_id IS NOT NULL
+               AND funder_wallet_address IS NOT NULL
+               AND mock_token_address IS NOT NULL
+               AND funding_tx_hash IS NOT NULL
+               AND repay_tx_hash IS NULL
+            """)
+    int markRepaid(
+            @Param("receivableId") Long receivableId,
+            @Param("companyId") Long companyId,
+            @Param("userId") Long userId,
+            @Param("txHash") String txHash
+    );
+
     @Select("""
             SELECT COUNT(*)
               FROM receivables
@@ -240,6 +329,42 @@ public interface ReceivableMapper {
             )
             """)
     void insertTokenizedHistory(
+            @Param("receivableId") Long receivableId,
+            @Param("companyId") Long companyId,
+            @Param("walletAddress") String walletAddress,
+            @Param("txHash") String txHash
+    );
+
+    @Insert("""
+            INSERT INTO receivable_status_history (
+                receivable_id, previous_status, current_status,
+                changed_by_company_id, changed_by_wallet_address,
+                tx_hash, change_reason
+            ) VALUES (
+                #{receivableId}, 'TOKENIZED', 'FUNDED',
+                #{companyId}, #{walletAddress},
+                #{txHash}, 'Funder funded receivable onchain'
+            )
+            """)
+    void insertFundedHistory(
+            @Param("receivableId") Long receivableId,
+            @Param("companyId") Long companyId,
+            @Param("walletAddress") String walletAddress,
+            @Param("txHash") String txHash
+    );
+
+    @Insert("""
+            INSERT INTO receivable_status_history (
+                receivable_id, previous_status, current_status,
+                changed_by_company_id, changed_by_wallet_address,
+                tx_hash, change_reason
+            ) VALUES (
+                #{receivableId}, 'FUNDED', 'REPAID',
+                #{companyId}, #{walletAddress},
+                #{txHash}, 'Buyer repaid receivable onchain'
+            )
+            """)
+    void insertRepaidHistory(
             @Param("receivableId") Long receivableId,
             @Param("companyId") Long companyId,
             @Param("walletAddress") String walletAddress,

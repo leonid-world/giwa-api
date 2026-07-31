@@ -10,6 +10,7 @@ public class BlockchainRpcProperties {
     private String rpcUrl = "";
     private Long chainId = 0L;
     private String receivableFinanceAddress = "";
+    private String mockKrwAddress = "";
     private Long rpcTimeoutMs = 10000L;
     private Integer minConfirmations = 1;
 
@@ -35,6 +36,14 @@ public class BlockchainRpcProperties {
 
     public void setReceivableFinanceAddress(String receivableFinanceAddress) {
         this.receivableFinanceAddress = receivableFinanceAddress;
+    }
+
+    public String getMockKrwAddress() {
+        return mockKrwAddress;
+    }
+
+    public void setMockKrwAddress(String mockKrwAddress) {
+        this.mockKrwAddress = mockKrwAddress;
     }
 
     public Long getRpcTimeoutMs() {

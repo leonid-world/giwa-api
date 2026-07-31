@@ -213,13 +213,32 @@ public class BlockchainTransactionService {
             Long receivableId
     ) {
         User user = findUser(email);
-        receivableMapper.findVisibleById(receivableId, user.companyId())
-                .orElseThrow(() -> new ApiException(
-                        HttpStatus.NOT_FOUND,
-                        "RECEIVABLE_NOT_FOUND",
-                        "매출채권을 찾을 수 없습니다."
-                ));
-        return transactionMapper.findAllByReceivableId(receivableId);
+        if (receivableMapper.findRelatedById(
+                receivableId,
+                user.companyId()
+        ).isPresent()) {
+            return transactionMapper.findAllByReceivableId(receivableId);
+        }
+
+        List<BlockchainTransactionResponse> ownFundingTransactions =
+                transactionMapper.findFundingByReceivableIdAndCompany(
+                        receivableId,
+                        user.companyId()
+                );
+        if (!ownFundingTransactions.isEmpty()) {
+            return ownFundingTransactions;
+        }
+        if (receivableMapper.findVisibleById(
+                receivableId,
+                user.companyId()
+        ).isPresent()) {
+            return List.of();
+        }
+        throw new ApiException(
+                HttpStatus.NOT_FOUND,
+                "RECEIVABLE_NOT_FOUND",
+                "매출채권을 찾을 수 없습니다."
+        );
     }
 
     @Transactional(isolation = Isolation.READ_COMMITTED)
@@ -380,23 +399,50 @@ public class BlockchainTransactionService {
             ReceivableResponse receivable,
             BlockchainTransactionType transactionType
     ) {
-        if (transactionType.requiredActor() == BlockchainTransactionType.RequiredActor.SELLER) {
-            requireCompany(
-                    companyId,
-                    receivable.getSellerCompanyId(),
-                    "ONLY_SELLER",
-                    "Seller 회사만 이 트랜잭션을 등록할 수 있습니다."
-            );
-            return normalizeWalletAddress(receivable.getSellerWalletAddress());
-        }
-
-        requireCompany(
-                companyId,
-                receivable.getBuyerCompanyId(),
-                "ONLY_BUYER",
-                "Buyer 회사만 이 트랜잭션을 등록할 수 있습니다."
-        );
-        return normalizeWalletAddress(receivable.getBuyerWalletAddress());
+        return switch (transactionType.requiredActor()) {
+            case SELLER -> {
+                requireCompany(
+                        companyId,
+                        receivable.getSellerCompanyId(),
+                        "ONLY_SELLER",
+                        "Seller 회사만 이 트랜잭션을 등록할 수 있습니다."
+                );
+                yield normalizeWalletAddress(
+                        receivable.getSellerWalletAddress()
+                );
+            }
+            case BUYER -> {
+                requireCompany(
+                        companyId,
+                        receivable.getBuyerCompanyId(),
+                        "ONLY_BUYER",
+                        "Buyer 회사만 이 트랜잭션을 등록할 수 있습니다."
+                );
+                yield normalizeWalletAddress(
+                        receivable.getBuyerWalletAddress()
+                );
+            }
+            case FUNDER -> {
+                if (Objects.equals(companyId, receivable.getSellerCompanyId())
+                        || Objects.equals(
+                        companyId,
+                        receivable.getBuyerCompanyId()
+                )) {
+                    throw new ApiException(
+                            HttpStatus.FORBIDDEN,
+                            "RELATED_PARTY_CANNOT_FUND",
+                            "Seller와 Buyer 회사는 해당 채권에 자금을 공급할 수 없습니다."
+                    );
+                }
+                Wallet wallet = walletMapper.findByCompanyId(companyId)
+                        .orElseThrow(() -> new ApiException(
+                                HttpStatus.CONFLICT,
+                                "FUNDER_WALLET_NOT_CONNECTED",
+                                "자금 공급 전에 Funder 회사 지갑을 연결해 주세요."
+                        ));
+                yield normalizeWalletAddress(wallet.walletAddress());
+            }
+        };
     }
 
     private void requireCompany(Long actualCompanyId, Long expectedCompanyId, String code, String message) {
@@ -453,6 +499,30 @@ public class BlockchainTransactionService {
                     HttpStatus.CONFLICT,
                     "RECEIVABLE_NOT_VERIFIED_ONCHAIN",
                     "Buyer의 GIWA 온체인 검증이 먼저 완료되어야 합니다."
+            );
+        }
+        if (transactionType == BlockchainTransactionType.FUND_RECEIVABLE
+                && (receivable.getVerifyTxHash() == null
+                || receivable.getTokenId() == null
+                || receivable.getTokenizeTxHash() == null)) {
+            throw new ApiException(
+                    HttpStatus.CONFLICT,
+                    "RECEIVABLE_NOT_TOKENIZED_ONCHAIN",
+                    "Seller의 GIWA 채권 토큰화가 먼저 완료되어야 합니다."
+            );
+        }
+        if (transactionType == BlockchainTransactionType.REPAY_RECEIVABLE
+                && (receivable.getVerifyTxHash() == null
+                || receivable.getTokenId() == null
+                || receivable.getTokenizeTxHash() == null
+                || receivable.getFunderCompanyId() == null
+                || receivable.getFunderWalletAddress() == null
+                || receivable.getMockTokenAddress() == null
+                || receivable.getFundingTxHash() == null)) {
+            throw new ApiException(
+                    HttpStatus.CONFLICT,
+                    "RECEIVABLE_NOT_FUNDED_ONCHAIN",
+                    "Funder의 GIWA 채권 펀딩이 먼저 완료되어야 합니다."
             );
         }
     }

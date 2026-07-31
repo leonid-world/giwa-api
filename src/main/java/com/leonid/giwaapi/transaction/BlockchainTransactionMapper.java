@@ -85,6 +85,18 @@ public interface BlockchainTransactionMapper {
     @Options(useCache = false, flushCache = Options.FlushCachePolicy.TRUE)
     List<BlockchainTransactionResponse> findAllByReceivableId(Long receivableId);
 
+    @Select(RESPONSE_SELECT + """
+            WHERE receivable_id = #{receivableId}
+              AND company_id = #{companyId}
+              AND transaction_type = 'FUND_RECEIVABLE'
+            ORDER BY submitted_at DESC, blockchain_transaction_id DESC
+            """)
+    @Options(useCache = false, flushCache = Options.FlushCachePolicy.TRUE)
+    List<BlockchainTransactionResponse> findFundingByReceivableIdAndCompany(
+            @Param("receivableId") Long receivableId,
+            @Param("companyId") Long companyId
+    );
+
     @Update("""
             UPDATE blockchain_transactions
                SET chain_id = #{chainId},
@@ -172,6 +184,18 @@ public interface BlockchainTransactionMapper {
                                 blockchain_transactions.transaction_type =
                                 'TOKENIZE_RECEIVABLE'
                                 AND LOWER(synchronized_receivable.tokenize_tx_hash) =
+                                    blockchain_transactions.tx_hash
+                            )
+                            OR (
+                                blockchain_transactions.transaction_type =
+                                'FUND_RECEIVABLE'
+                                AND LOWER(synchronized_receivable.funding_tx_hash) =
+                                    blockchain_transactions.tx_hash
+                            )
+                            OR (
+                                blockchain_transactions.transaction_type =
+                                'REPAY_RECEIVABLE'
+                                AND LOWER(synchronized_receivable.repay_tx_hash) =
                                     blockchain_transactions.tx_hash
                             )
                        )

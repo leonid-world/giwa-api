@@ -3,7 +3,9 @@ package com.leonid.giwaapi.transaction;
 enum BlockchainTransactionType {
     CREATE_RECEIVABLE("createReceivable", RequiredActor.SELLER, "CREATED"),
     VERIFY_RECEIVABLE("verifyReceivable", RequiredActor.BUYER, "CREATED"),
-    TOKENIZE_RECEIVABLE("tokenizeReceivable", RequiredActor.SELLER, "VERIFIED");
+    TOKENIZE_RECEIVABLE("tokenizeReceivable", RequiredActor.SELLER, "VERIFIED"),
+    FUND_RECEIVABLE("fundReceivable", RequiredActor.FUNDER, "TOKENIZED"),
+    REPAY_RECEIVABLE("repayReceivable", RequiredActor.BUYER, "FUNDED");
 
     private final String functionName;
     private final RequiredActor requiredActor;
@@ -33,6 +35,7 @@ enum BlockchainTransactionType {
 
     enum RequiredActor {
         SELLER,
-        BUYER
+        BUYER,
+        FUNDER
     }
 }

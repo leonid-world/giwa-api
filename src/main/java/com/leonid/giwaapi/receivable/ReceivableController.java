@@ -37,6 +37,13 @@ public class ReceivableController {
         return receivableService.getAll(email);
     }
 
+    @GetMapping("/funding-opportunities")
+    public List<ReceivableResponse> getFundingOpportunities(
+            @AuthenticationPrincipal String email
+    ) {
+        return receivableService.getFundingOpportunities(email);
+    }
+
     @GetMapping("/{receivableId}")
     public ReceivableResponse getById(
             @AuthenticationPrincipal String email,
@@ -70,5 +77,23 @@ public class ReceivableController {
             @Valid @RequestBody ReceivableTokenizedRequest request
     ) {
         return receivableService.markTokenized(email, receivableId, request);
+    }
+
+    @PostMapping("/{receivableId}/funded")
+    public ReceivableResponse markFunded(
+            @AuthenticationPrincipal String email,
+            @PathVariable Long receivableId,
+            @Valid @RequestBody ReceivableFundedRequest request
+    ) {
+        return receivableService.markFunded(email, receivableId, request);
+    }
+
+    @PostMapping("/{receivableId}/repaid")
+    public ReceivableResponse markRepaid(
+            @AuthenticationPrincipal String email,
+            @PathVariable Long receivableId,
+            @Valid @RequestBody ReceivableRepaidRequest request
+    ) {
+        return receivableService.markRepaid(email, receivableId, request);
     }
 }

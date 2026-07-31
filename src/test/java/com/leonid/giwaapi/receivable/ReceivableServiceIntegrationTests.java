@@ -1,6 +1,7 @@
 package com.leonid.giwaapi.receivable;
 
 import com.leonid.giwaapi.auth.AuthService;
+import com.leonid.giwaapi.auth.AuthResponse;
 import com.leonid.giwaapi.auth.SignupRequest;
 import com.leonid.giwaapi.wallet.WalletConnectRequest;
 import com.leonid.giwaapi.wallet.WalletService;
@@ -85,5 +86,122 @@ class ReceivableServiceIntegrationTests {
                 .isInstanceOf(ResponseStatusException.class)
                 .satisfies(error -> assertThat(((ResponseStatusException) error).getStatusCode())
                         .isEqualTo(HttpStatus.NOT_FOUND));
+    }
+
+    @Test
+    void exposesTokenizedFundingOpportunitiesOnlyToUnrelatedCompanies() {
+        String sellerEmail = "opportunity-seller@example.com";
+        String buyerEmail = "opportunity-buyer@example.com";
+        String funderEmail = "opportunity-funder@example.com";
+        authService.signup(new SignupRequest(
+                sellerEmail,
+                "password123",
+                "Seller User",
+                "Opportunity Seller",
+                "7111111111"
+        ));
+        authService.signup(new SignupRequest(
+                buyerEmail,
+                "password123",
+                "Buyer User",
+                "Opportunity Buyer",
+                "7222222222"
+        ));
+        AuthResponse funderAuth = authService.signup(new SignupRequest(
+                funderEmail,
+                "password123",
+                "Funder User",
+                "Opportunity Funder",
+                "7333333333"
+        ));
+        walletService.connect(sellerEmail, new WalletConnectRequest(
+                "0x7111111111111111111111111111111111111111",
+                1337L
+        ));
+        walletService.connect(buyerEmail, new WalletConnectRequest(
+                "0x7222222222222222222222222222222222222222",
+                1337L
+        ));
+
+        ReceivableResponse created = receivableService.create(
+                sellerEmail,
+                new ReceivableCreateRequest(
+                        "7222222222",
+                        new BigDecimal("1000000"),
+                        new BigDecimal("900000"),
+                        LocalDate.of(2026, 7, 30),
+                        LocalDate.of(2026, 8, 30),
+                        null,
+                        "Funding opportunity test"
+                )
+        );
+
+        assertThat(receivableService.getFundingOpportunities(funderEmail))
+                .isEmpty();
+        assertThatThrownBy(
+                () -> receivableService.getById(
+                        funderEmail,
+                        created.getReceivableId()
+                )
+        ).isInstanceOf(ResponseStatusException.class);
+
+        jdbcTemplate.update(
+                """
+                UPDATE receivables
+                   SET status = 'TOKENIZED',
+                       onchain_receivable_id = 1,
+                       contract_address = ?,
+                       create_tx_hash = ?,
+                       verify_tx_hash = ?,
+                       token_id = 9,
+                       tokenize_tx_hash = ?
+                 WHERE receivable_id = ?
+                """,
+                "0x7333333333333333333333333333333333333333",
+                "0x" + "a".repeat(64),
+                "0x" + "b".repeat(64),
+                "0x" + "c".repeat(64),
+                created.getReceivableId()
+        );
+
+        assertThat(receivableService.getFundingOpportunities(sellerEmail))
+                .isEmpty();
+        assertThat(receivableService.getFundingOpportunities(buyerEmail))
+                .isEmpty();
+        assertThat(receivableService.getFundingOpportunities(funderEmail))
+                .extracting(ReceivableResponse::getReceivableId)
+                .containsExactly(created.getReceivableId());
+        assertThat(
+                receivableService.getById(
+                        funderEmail,
+                        created.getReceivableId()
+                ).getStatus()
+        ).isEqualTo("TOKENIZED");
+
+        jdbcTemplate.update(
+                """
+                UPDATE receivables
+                   SET status = 'FUNDED',
+                       funder_company_id = ?,
+                       funder_wallet_address = ?,
+                       mock_token_address = ?,
+                       funding_tx_hash = ?
+                 WHERE receivable_id = ?
+                """,
+                funderAuth.user().companyId(),
+                "0x7333333333333333333333333333333333333333",
+                "0x7444444444444444444444444444444444444444",
+                "0x" + "d".repeat(64),
+                created.getReceivableId()
+        );
+
+        assertThat(receivableService.getFundingOpportunities(funderEmail))
+                .isEmpty();
+        ReceivableResponse funded = receivableService.getById(
+                funderEmail,
+                created.getReceivableId()
+        );
+        assertThat(funded.getFunderCompanyName())
+                .isEqualTo("Opportunity Funder");
     }
 }

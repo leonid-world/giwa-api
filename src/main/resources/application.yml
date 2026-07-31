@@ -31,6 +31,7 @@ app:
   blockchain:
     rpc-url: ${GIWA_RPC_URL:https://sepolia-rpc.giwa.io}
     chain-id: ${GIWA_CHAIN_ID:91342}
-    receivable-finance-address: ${GIWA_RECEIVABLE_FINANCE_ADDRESS:0xc72A8FE507E6D9C21c1D3cDc83C7dbB15E740327}
+    receivable-finance-address: ${GIWA_RECEIVABLE_FINANCE_ADDRESS:0x0f264334f98BA0d22f7Fc6Bb901a5Fa36158a315}
+    mock-krw-address: ${GIWA_MOCK_KRW_ADDRESS:0x5cD8a99Dcf5Fa00fb4fD9873b41A15F9C13C9d3F}
     rpc-timeout-ms: ${GIWA_RPC_TIMEOUT_MS:10000}
     min-confirmations: ${GIWA_MIN_CONFIRMATIONS:1}

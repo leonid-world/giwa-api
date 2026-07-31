@@ -24,17 +24,29 @@ class BlockchainTransactionVerifierTests {
             "0x1111111111111111111111111111111111111111";
     private static final String BUYER =
             "0x2222222222222222222222222222222222222222";
+    private static final String FUNDER =
+            "0x4444444444444444444444444444444444444444";
+    private static final String MOCK_KRW =
+            "0x5555555555555555555555555555555555555555";
+    private static final String CURRENT_NFT_OWNER =
+            "0x6666666666666666666666666666666666666666";
     private static final String TX_HASH = "0x" + "a".repeat(64);
     private static final String BLOCK_HASH = "0x" + "b".repeat(64);
     private static final String CREATE_SELECTOR = "0x7e76b240";
     private static final String VERIFY_SELECTOR = "0xdc427644";
     private static final String TOKENIZE_SELECTOR = "0x220f6023";
+    private static final String FUND_SELECTOR = "0x1b6942f7";
+    private static final String REPAY_SELECTOR = "0x44b436a2";
     private static final String CREATED_TOPIC =
             "0x1bdd8be99eb9596b98b73c8a3332842b0d72ad22d401c34ec8f9713c5a131b83";
     private static final String VERIFIED_TOPIC =
             "0x16e60068e1ac09e3fe4ab4768c3d6e11881d9c6dbfbac9dbd309d43279708a1d";
     private static final String TOKENIZED_TOPIC =
             "0xc6175902bb25116fdbe490fcc358b7e2466cd0c1404c77dd33dbf9e1ca784ff6";
+    private static final String FUNDED_TOPIC =
+            "0xe93444f08ff0957c68671665a88dd90883f966a85b1b149ef7fd1088accd5c35";
+    private static final String REPAID_TOPIC =
+            "0xf97e23bde112639eb0108294d568bb31c4560506dbb74a9fdea9439ffbc32451";
     private static final String TRANSFER_TOPIC =
             "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 
@@ -49,6 +61,7 @@ class BlockchainTransactionVerifierTests {
         properties.setRpcUrl("http://127.0.0.1:8545");
         properties.setChainId(CHAIN_ID);
         properties.setReceivableFinanceAddress(CONTRACT);
+        properties.setMockKrwAddress(MOCK_KRW);
         properties.setMinConfirmations(2);
         verifier = new BlockchainTransactionVerifier(rpcClient, properties);
         receivable = receivable();
@@ -108,6 +121,208 @@ class BlockchainTransactionVerifierTests {
 
         assertThat(verified.eventReceivableId()).isEqualTo(7L);
         assertThat(verified.eventTokenId()).isEqualTo(9L);
+    }
+
+    @Test
+    void verifiesFundingEventPaymentTransferAndEscrowNftTransfer() {
+        receivable.setOnchainReceivableId(7L);
+        receivable.setTokenId(9L);
+        BlockchainTransactionResponse transaction =
+                journal("FUND_RECEIVABLE", "fundReceivable", FUNDER);
+        rpcClient.proof = fundProof();
+
+        VerifiedBlockchainTransaction verified = verifier.verify(
+                transaction,
+                receivable,
+                7L
+        );
+
+        assertThat(verified.eventReceivableId()).isEqualTo(7L);
+        assertThat(verified.eventTokenId()).isEqualTo(9L);
+    }
+
+    @Test
+    void verifiesRepaymentToCurrentNftOwnerInsteadOfOriginalFunder() {
+        receivable.setOnchainReceivableId(7L);
+        receivable.setTokenId(9L);
+        receivable.setFunderWalletAddress(FUNDER);
+        receivable.setMockTokenAddress(MOCK_KRW);
+        BlockchainTransactionResponse transaction =
+                journal("REPAY_RECEIVABLE", "repayReceivable", BUYER);
+        rpcClient.proof = repayProof();
+
+        VerifiedBlockchainTransaction verified = verifier.verify(
+                transaction,
+                receivable,
+                7L
+        );
+
+        assertThat(verified.eventReceivableId()).isEqualTo(7L);
+        assertThat(verified.eventTokenId()).isEqualTo(9L);
+    }
+
+    @Test
+    void rejectsRepaymentWhenPaymentRecipientDoesNotMatchEventRecipient() {
+        receivable.setOnchainReceivableId(7L);
+        receivable.setTokenId(9L);
+        receivable.setMockTokenAddress(MOCK_KRW);
+        GiwaRpcProof proof = repayProof();
+        GiwaRpcProof.Log invalidPayment = new GiwaRpcProof.Log(
+                MOCK_KRW,
+                List.of(
+                        TRANSFER_TOPIC,
+                        addressTopic(BUYER),
+                        addressTopic(FUNDER)
+                ),
+                "0x" + word(1_000_000),
+                false
+        );
+        List<GiwaRpcProof.Log> invalidLogs =
+                new ArrayList<>(proof.receipt().logs());
+        invalidLogs.set(0, invalidPayment);
+        GiwaRpcProof.Receipt invalidReceipt = new GiwaRpcProof.Receipt(
+                proof.receipt().transactionHash(),
+                proof.receipt().from(),
+                proof.receipt().to(),
+                proof.receipt().blockNumber(),
+                proof.receipt().blockHash(),
+                proof.receipt().status(),
+                proof.receipt().gasUsed(),
+                proof.receipt().effectiveGasPrice(),
+                List.copyOf(invalidLogs)
+        );
+        rpcClient.proof = withReceipt(proof, invalidReceipt);
+
+        assertCode(
+                () -> verifier.verify(
+                        journal(
+                                "REPAY_RECEIVABLE",
+                                "repayReceivable",
+                                BUYER
+                        ),
+                        receivable,
+                        7L
+                ),
+                "BLOCKCHAIN_TRANSACTION_VERIFICATION_FAILED",
+                true
+        );
+    }
+
+    @Test
+    void keepsRepaymentMockTokenConfigurationMismatchRetryable() {
+        receivable.setOnchainReceivableId(7L);
+        receivable.setTokenId(9L);
+        receivable.setMockTokenAddress(
+                "0x7777777777777777777777777777777777777777"
+        );
+        rpcClient.proof = repayProof();
+
+        assertCode(
+                () -> verifier.verify(
+                        journal(
+                                "REPAY_RECEIVABLE",
+                                "repayReceivable",
+                                BUYER
+                        ),
+                        receivable,
+                        7L
+                ),
+                "BLOCKCHAIN_RPC_CONFIGURATION_MISMATCH",
+                false
+        );
+    }
+
+    @Test
+    void rejectsFundingWhenPaymentTransferAmountDoesNotMatch() {
+        receivable.setOnchainReceivableId(7L);
+        receivable.setTokenId(9L);
+        GiwaRpcProof proof = fundProof();
+        GiwaRpcProof.Log invalidPayment = new GiwaRpcProof.Log(
+                MOCK_KRW,
+                List.of(
+                        TRANSFER_TOPIC,
+                        addressTopic(FUNDER),
+                        addressTopic(SELLER)
+                ),
+                "0x" + word(899_999),
+                false
+        );
+        List<GiwaRpcProof.Log> invalidLogs =
+                new ArrayList<>(proof.receipt().logs());
+        invalidLogs.set(0, invalidPayment);
+        GiwaRpcProof.Receipt invalidReceipt = new GiwaRpcProof.Receipt(
+                proof.receipt().transactionHash(),
+                proof.receipt().from(),
+                proof.receipt().to(),
+                proof.receipt().blockNumber(),
+                proof.receipt().blockHash(),
+                proof.receipt().status(),
+                proof.receipt().gasUsed(),
+                proof.receipt().effectiveGasPrice(),
+                List.copyOf(invalidLogs)
+        );
+        rpcClient.proof = withReceipt(proof, invalidReceipt);
+
+        assertCode(
+                () -> verifier.verify(
+                        journal(
+                                "FUND_RECEIVABLE",
+                                "fundReceivable",
+                                FUNDER
+                        ),
+                        receivable,
+                        7L
+                ),
+                "BLOCKCHAIN_TRANSACTION_VERIFICATION_FAILED",
+                true
+        );
+    }
+
+    @Test
+    void rejectsFundingWhenEscrowNftIsNotTransferredToFunder() {
+        receivable.setOnchainReceivableId(7L);
+        receivable.setTokenId(9L);
+        GiwaRpcProof proof = fundProof();
+        GiwaRpcProof.Log invalidNftTransfer = new GiwaRpcProof.Log(
+                CONTRACT,
+                List.of(
+                        TRANSFER_TOPIC,
+                        addressTopic(CONTRACT),
+                        addressTopic(SELLER),
+                        topic(9)
+                ),
+                "0x",
+                false
+        );
+        List<GiwaRpcProof.Log> invalidLogs =
+                new ArrayList<>(proof.receipt().logs());
+        invalidLogs.set(1, invalidNftTransfer);
+        GiwaRpcProof.Receipt invalidReceipt = new GiwaRpcProof.Receipt(
+                proof.receipt().transactionHash(),
+                proof.receipt().from(),
+                proof.receipt().to(),
+                proof.receipt().blockNumber(),
+                proof.receipt().blockHash(),
+                proof.receipt().status(),
+                proof.receipt().gasUsed(),
+                proof.receipt().effectiveGasPrice(),
+                List.copyOf(invalidLogs)
+        );
+        rpcClient.proof = withReceipt(proof, invalidReceipt);
+
+        assertCode(
+                () -> verifier.verify(
+                        journal(
+                                "FUND_RECEIVABLE",
+                                "fundReceivable",
+                                FUNDER
+                        ),
+                        receivable,
+                        7L
+                ),
+                "BLOCKCHAIN_TRANSACTION_VERIFICATION_FAILED",
+                true
+        );
     }
 
     @Test
@@ -434,6 +649,75 @@ class BlockchainTransactionVerifierTests {
                 SELLER,
                 TOKENIZE_SELECTOR + word(7),
                 List.of(transfer, tokenized)
+        );
+    }
+
+    private GiwaRpcProof fundProof() {
+        GiwaRpcProof.Log paymentTransfer = new GiwaRpcProof.Log(
+                MOCK_KRW,
+                List.of(
+                        TRANSFER_TOPIC,
+                        addressTopic(FUNDER),
+                        addressTopic(SELLER)
+                ),
+                "0x" + word(900_000),
+                false
+        );
+        GiwaRpcProof.Log nftTransfer = new GiwaRpcProof.Log(
+                CONTRACT,
+                List.of(
+                        TRANSFER_TOPIC,
+                        addressTopic(CONTRACT),
+                        addressTopic(FUNDER),
+                        topic(9)
+                ),
+                "0x",
+                false
+        );
+        GiwaRpcProof.Log funded = new GiwaRpcProof.Log(
+                CONTRACT,
+                List.of(
+                        FUNDED_TOPIC,
+                        topic(7),
+                        topic(9),
+                        addressTopic(FUNDER)
+                ),
+                "0x" + addressWord(SELLER) + word(900_000),
+                false
+        );
+        return proof(
+                FUNDER,
+                FUND_SELECTOR + word(7),
+                List.of(paymentTransfer, nftTransfer, funded)
+        );
+    }
+
+    private GiwaRpcProof repayProof() {
+        GiwaRpcProof.Log paymentTransfer = new GiwaRpcProof.Log(
+                MOCK_KRW,
+                List.of(
+                        TRANSFER_TOPIC,
+                        addressTopic(BUYER),
+                        addressTopic(CURRENT_NFT_OWNER)
+                ),
+                "0x" + word(1_000_000),
+                false
+        );
+        GiwaRpcProof.Log repaid = new GiwaRpcProof.Log(
+                CONTRACT,
+                List.of(
+                        REPAID_TOPIC,
+                        topic(7),
+                        topic(9),
+                        addressTopic(BUYER)
+                ),
+                "0x" + addressWord(CURRENT_NFT_OWNER) + word(1_000_000),
+                false
+        );
+        return proof(
+                BUYER,
+                REPAY_SELECTOR + word(7),
+                List.of(paymentTransfer, repaid)
         );
     }
 

@@ -53,12 +53,15 @@ class BlockchainTransactionServiceIntegrationTests {
     private static final String OUTSIDER_EMAIL = "journal-outsider@example.com";
     private static final String SELLER_WALLET = "0x1111111111111111111111111111111111111111";
     private static final String BUYER_WALLET = "0x2222222222222222222222222222222222222222";
+    private static final String FUNDER_WALLET = "0x9999999999999999999999999999999999999999";
     private static final String CONTRACT = "0x" + "A".repeat(40);
     private static final String OTHER_CONTRACT = "0x" + "B".repeat(40);
     private static final String CREATE_TX = "0x" + "A".repeat(64);
     private static final String VERIFY_TX = "0x" + "B".repeat(64);
     private static final String TOKENIZE_TX = "0x" + "C".repeat(64);
     private static final String SECOND_TX = "0x" + "D".repeat(64);
+    private static final String FUND_TX = "0x" + "9".repeat(64);
+    private static final String REPAY_TX = "0x" + "8".repeat(64);
 
     @Autowired
     private AuthService authService;
@@ -97,8 +100,16 @@ class BlockchainTransactionServiceIntegrationTests {
                     Long eventReceivableId = expectedReceivableId != null
                             ? expectedReceivableId
                             : 1L;
-                    Long eventTokenId = "TOKENIZE_RECEIVABLE".equals(
-                            transaction.getTransactionType()
+                    Long eventTokenId = (
+                            "TOKENIZE_RECEIVABLE".equals(
+                                    transaction.getTransactionType()
+                            )
+                                    || "FUND_RECEIVABLE".equals(
+                                    transaction.getTransactionType()
+                            )
+                                    || "REPAY_RECEIVABLE".equals(
+                                    transaction.getTransactionType()
+                            )
                     ) ? 1L : null;
                     return new VerifiedBlockchainTransaction(
                             91342L,
@@ -705,6 +716,257 @@ class BlockchainTransactionServiceIntegrationTests {
                 HttpStatus.NOT_FOUND,
                 "RECEIVABLE_NOT_FOUND"
         );
+    }
+
+    @Test
+    void derivesThirdPartyFunderAndLimitsCandidateJournalVisibility() {
+        Fixture fixture = createFixture();
+        Long receivableId = fixture.receivable().getReceivableId();
+        transactionService.create(
+                SELLER_EMAIL,
+                createRequest(
+                        receivableId,
+                        "CREATE_RECEIVABLE",
+                        CONTRACT,
+                        CREATE_TX
+                )
+        );
+        markReceivableChainCreated(receivableId);
+        jdbcTemplate.update(
+                """
+                UPDATE receivables
+                   SET status = 'TOKENIZED',
+                       verify_tx_hash = ?,
+                       token_id = 1,
+                       tokenize_tx_hash = ?
+                 WHERE receivable_id = ?
+                """,
+                "0x" + "e".repeat(64),
+                TOKENIZE_TX.toLowerCase(),
+                receivableId
+        );
+        assertApiError(
+                () -> transactionService.create(
+                        SELLER_EMAIL,
+                        createRequest(
+                                receivableId,
+                                "FUND_RECEIVABLE",
+                                CONTRACT,
+                                FUND_TX
+                        )
+                ),
+                HttpStatus.FORBIDDEN,
+                "RELATED_PARTY_CANNOT_FUND"
+        );
+        assertApiError(
+                () -> transactionService.create(
+                        BUYER_EMAIL,
+                        createRequest(
+                                receivableId,
+                                "FUND_RECEIVABLE",
+                                CONTRACT,
+                                FUND_TX
+                        )
+                ),
+                HttpStatus.FORBIDDEN,
+                "RELATED_PARTY_CANNOT_FUND"
+        );
+        assertApiError(
+                () -> transactionService.create(
+                        OUTSIDER_EMAIL,
+                        createRequest(
+                                receivableId,
+                                "FUND_RECEIVABLE",
+                                CONTRACT,
+                                FUND_TX
+                        )
+                ),
+                HttpStatus.CONFLICT,
+                "FUNDER_WALLET_NOT_CONNECTED"
+        );
+        walletService.connect(
+                OUTSIDER_EMAIL,
+                new WalletConnectRequest(FUNDER_WALLET, 1337L)
+        );
+        assertThat(
+                transactionService.getAllByReceivable(
+                        OUTSIDER_EMAIL,
+                        receivableId
+                )
+        ).isEmpty();
+
+        BlockchainTransactionResponse funding = transactionService.create(
+                OUTSIDER_EMAIL,
+                createRequest(
+                        receivableId,
+                        "FUND_RECEIVABLE",
+                        CONTRACT,
+                        FUND_TX
+                )
+        );
+        BlockchainTransactionResponse confirmedFunding =
+                transactionService.markConfirmed(
+                        OUTSIDER_EMAIL,
+                        FUND_TX,
+                        new BlockchainTransactionConfirmedRequest(
+                                "123",
+                                "21000",
+                                "1000000000"
+                        )
+                );
+
+        assertThat(funding.getCompanyId())
+                .isEqualTo(fixture.outsiderAuth().user().companyId());
+        assertThat(funding.getWalletAddress()).isEqualTo(FUNDER_WALLET);
+        assertThat(funding.getFunctionName()).isEqualTo("fundReceivable");
+        assertThat(
+                transactionService.getAllByReceivable(
+                        OUTSIDER_EMAIL,
+                        receivableId
+                )
+        ).extracting(BlockchainTransactionResponse::getTransactionType)
+                .containsExactly("FUND_RECEIVABLE");
+        assertThat(
+                transactionService.getAllByReceivable(
+                        SELLER_EMAIL,
+                        receivableId
+                )
+        ).hasSize(2);
+
+        jdbcTemplate.update(
+                """
+                UPDATE receivables
+                   SET status = 'FUNDED',
+                       funder_company_id = ?,
+                       funder_wallet_address = ?,
+                       mock_token_address = ?,
+                       funding_tx_hash = ?
+                 WHERE receivable_id = ?
+                """,
+                fixture.outsiderAuth().user().companyId(),
+                FUNDER_WALLET,
+                "0x8888888888888888888888888888888888888888",
+                FUND_TX.toLowerCase(),
+                receivableId
+        );
+        assertThat(
+                transactionService.getAllByReceivable(
+                        OUTSIDER_EMAIL,
+                        receivableId
+                )
+        ).hasSize(2);
+        assertThat(transactionMapper.markVerificationFailed(
+                FUND_TX.toLowerCase(),
+                fixture.outsiderAuth().user().companyId(),
+                "BLOCKCHAIN_TRANSACTION_REVERTED",
+                "stale terminal result",
+                confirmedFunding.getVerificationVersion()
+        )).isZero();
+    }
+
+    @Test
+    void derivesBuyerRepaymentAndProtectsSynchronizedJournalFromLateFailure() {
+        Fixture fixture = createFixture();
+        Long receivableId = fixture.receivable().getReceivableId();
+        markReceivableChainCreated(receivableId);
+        jdbcTemplate.update(
+                """
+                UPDATE receivables
+                   SET status = 'FUNDED',
+                       verify_tx_hash = ?,
+                       token_id = 1,
+                       tokenize_tx_hash = ?
+                 WHERE receivable_id = ?
+                """,
+                "0x" + "e".repeat(64),
+                TOKENIZE_TX.toLowerCase(),
+                receivableId
+        );
+
+        assertApiError(
+                () -> transactionService.create(
+                        BUYER_EMAIL,
+                        createRequest(
+                                receivableId,
+                                "REPAY_RECEIVABLE",
+                                CONTRACT,
+                                REPAY_TX
+                        )
+                ),
+                HttpStatus.CONFLICT,
+                "RECEIVABLE_NOT_FUNDED_ONCHAIN"
+        );
+
+        jdbcTemplate.update(
+                """
+                UPDATE receivables
+                   SET funder_company_id = ?,
+                       funder_wallet_address = ?,
+                       mock_token_address = ?,
+                       funding_tx_hash = ?
+                 WHERE receivable_id = ?
+                """,
+                fixture.outsiderAuth().user().companyId(),
+                FUNDER_WALLET,
+                "0x8888888888888888888888888888888888888888",
+                FUND_TX.toLowerCase(),
+                receivableId
+        );
+        assertApiError(
+                () -> transactionService.create(
+                        SELLER_EMAIL,
+                        createRequest(
+                                receivableId,
+                                "REPAY_RECEIVABLE",
+                                CONTRACT,
+                                REPAY_TX
+                        )
+                ),
+                HttpStatus.FORBIDDEN,
+                "ONLY_BUYER"
+        );
+
+        BlockchainTransactionResponse repayment = transactionService.create(
+                BUYER_EMAIL,
+                createRequest(
+                        receivableId,
+                        "REPAY_RECEIVABLE",
+                        CONTRACT,
+                        REPAY_TX
+                )
+        );
+        BlockchainTransactionResponse confirmedRepayment =
+                transactionService.markConfirmed(
+                        BUYER_EMAIL,
+                        REPAY_TX,
+                        new BlockchainTransactionConfirmedRequest(
+                                "123",
+                                "21000",
+                                "1000000000"
+                        )
+                );
+
+        assertThat(repayment.getWalletAddress()).isEqualTo(BUYER_WALLET);
+        assertThat(repayment.getFunctionName()).isEqualTo("repayReceivable");
+        assertThat(confirmedRepayment.getEventTokenId()).isEqualTo(1L);
+
+        jdbcTemplate.update(
+                """
+                UPDATE receivables
+                   SET status = 'REPAID',
+                       repay_tx_hash = ?
+                 WHERE receivable_id = ?
+                """,
+                REPAY_TX.toLowerCase(),
+                receivableId
+        );
+        assertThat(transactionMapper.markVerificationFailed(
+                REPAY_TX.toLowerCase(),
+                fixture.buyerAuth().user().companyId(),
+                "BLOCKCHAIN_TRANSACTION_REVERTED",
+                "stale terminal result",
+                confirmedRepayment.getVerificationVersion()
+        )).isZero();
     }
 
     @Test

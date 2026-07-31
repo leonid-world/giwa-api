@@ -34,6 +34,8 @@ public class BlockchainTransactionVerifier {
     private static final String CREATE_SELECTOR = "0x7e76b240";
     private static final String VERIFY_SELECTOR = "0xdc427644";
     private static final String TOKENIZE_SELECTOR = "0x220f6023";
+    private static final String FUND_SELECTOR = "0x1b6942f7";
+    private static final String REPAY_SELECTOR = "0x44b436a2";
 
     private static final String CREATED_TOPIC =
             "0x1bdd8be99eb9596b98b73c8a3332842b0d72ad22d401c34ec8f9713c5a131b83";
@@ -41,6 +43,10 @@ public class BlockchainTransactionVerifier {
             "0x16e60068e1ac09e3fe4ab4768c3d6e11881d9c6dbfbac9dbd309d43279708a1d";
     private static final String TOKENIZED_TOPIC =
             "0xc6175902bb25116fdbe490fcc358b7e2466cd0c1404c77dd33dbf9e1ca784ff6";
+    private static final String FUNDED_TOPIC =
+            "0xe93444f08ff0957c68671665a88dd90883f966a85b1b149ef7fd1088accd5c35";
+    private static final String REPAID_TOPIC =
+            "0xf97e23bde112639eb0108294d568bb31c4560506dbb74a9fdea9439ffbc32451";
     private static final String TRANSFER_TOPIC =
             "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 
@@ -221,6 +227,22 @@ public class BlockchainTransactionVerifier {
                     rpcTransaction.input(),
                     receipt.logs(),
                     configuredContract,
+                    transaction,
+                    receivable
+            );
+            case FUND_RECEIVABLE -> verifyFund(
+                    rpcTransaction.input(),
+                    receipt.logs(),
+                    configuredContract,
+                    configuredMockKrwAddress(),
+                    transaction,
+                    receivable
+            );
+            case REPAY_RECEIVABLE -> verifyRepay(
+                    rpcTransaction.input(),
+                    receipt.logs(),
+                    configuredContract,
+                    configuredMockKrwAddress(),
                     transaction,
                     receivable
             );
@@ -447,6 +469,217 @@ public class BlockchainTransactionVerifier {
             );
         }
         return new EventValues(eventReceivableId, tokenId);
+    }
+
+    private EventValues verifyFund(
+            String input,
+            List<GiwaRpcProof.Log> logs,
+            String configuredContract,
+            String configuredMockKrw,
+            BlockchainTransactionResponse transaction,
+            ReceivableResponse receivable
+    ) {
+        requireFunctionName(transaction, "fundReceivable");
+        Long expectedReceivableId = requiredOnchainId(receivable);
+        Long expectedTokenId = receivable.getTokenId();
+        if (expectedTokenId == null || expectedTokenId <= 0) {
+            throw verificationFailed("DB 토큰 ID를 확인할 수 없습니다.");
+        }
+
+        List<String> arguments = calldataWords(input, FUND_SELECTOR, 1);
+        requireUint(
+                arguments.get(0),
+                BigInteger.valueOf(expectedReceivableId),
+                "fundReceivable 채권 ID가 DB와 일치하지 않습니다."
+        );
+
+        GiwaRpcProof.Log funded = singleEvent(
+                logs,
+                configuredContract,
+                FUNDED_TOPIC
+        );
+        requireTopicCount(funded, 4);
+        List<String> fundedData = dataWords(funded.data(), 2);
+        Long eventReceivableId = positiveLongWord(
+                funded.topics().get(1),
+                "ReceivableFunded 채권 ID"
+        );
+        Long eventTokenId = positiveLongWord(
+                funded.topics().get(2),
+                "ReceivableFunded 토큰 ID"
+        );
+        if (!Objects.equals(expectedReceivableId, eventReceivableId)) {
+            throw eventMismatch(
+                    "ReceivableFunded 채권 ID가 DB와 일치하지 않습니다."
+            );
+        }
+        if (!Objects.equals(expectedTokenId, eventTokenId)) {
+            throw eventMismatch(
+                    "ReceivableFunded 토큰 ID가 DB와 일치하지 않습니다."
+            );
+        }
+        requireSameAddress(
+                decodeAddress(topicWord(funded, 3)),
+                transaction.getWalletAddress(),
+                "ReceivableFunded Funder가 등록 지갑과 일치하지 않습니다."
+        );
+        requireSameAddress(
+                decodeAddress(fundedData.get(0)),
+                receivable.getSellerWalletAddress(),
+                "ReceivableFunded Seller가 DB와 일치하지 않습니다."
+        );
+        requireUint(
+                fundedData.get(1),
+                decimalInteger(receivable.getFundingAmount(), "펀딩 금액"),
+                "ReceivableFunded 펀딩 금액이 DB와 일치하지 않습니다."
+        );
+
+        GiwaRpcProof.Log paymentTransfer = singleEvent(
+                logs,
+                configuredMockKrw,
+                TRANSFER_TOPIC
+        );
+        requireTopicCount(paymentTransfer, 3);
+        List<String> paymentData = dataWords(paymentTransfer.data(), 1);
+        requireSameAddress(
+                decodeAddress(topicWord(paymentTransfer, 1)),
+                transaction.getWalletAddress(),
+                "mKRW Transfer 발신자가 Funder와 일치하지 않습니다."
+        );
+        requireSameAddress(
+                decodeAddress(topicWord(paymentTransfer, 2)),
+                receivable.getSellerWalletAddress(),
+                "mKRW Transfer 수신자가 Seller와 일치하지 않습니다."
+        );
+        requireUint(
+                paymentData.get(0),
+                decimalInteger(receivable.getFundingAmount(), "펀딩 금액"),
+                "mKRW Transfer 금액이 DB와 일치하지 않습니다."
+        );
+
+        GiwaRpcProof.Log nftTransfer = singleEvent(
+                logs,
+                configuredContract,
+                TRANSFER_TOPIC
+        );
+        requireTopicCount(nftTransfer, 4);
+        requireEmptyData(nftTransfer);
+        requireSameAddress(
+                decodeAddress(topicWord(nftTransfer, 1)),
+                configuredContract,
+                "ERC-721 Transfer 발신자가 escrow 컨트랙트가 아닙니다."
+        );
+        requireSameAddress(
+                decodeAddress(topicWord(nftTransfer, 2)),
+                transaction.getWalletAddress(),
+                "ERC-721 Transfer 수신자가 Funder와 일치하지 않습니다."
+        );
+        if (!Objects.equals(
+                eventTokenId,
+                positiveLongWord(
+                        nftTransfer.topics().get(3),
+                        "ERC-721 Transfer 토큰 ID"
+                )
+        )) {
+            throw eventMismatch(
+                    "ERC-721 Transfer 토큰 ID가 ReceivableFunded와 일치하지 않습니다."
+            );
+        }
+        return new EventValues(eventReceivableId, eventTokenId);
+    }
+
+    private EventValues verifyRepay(
+            String input,
+            List<GiwaRpcProof.Log> logs,
+            String configuredContract,
+            String configuredMockKrw,
+            BlockchainTransactionResponse transaction,
+            ReceivableResponse receivable
+    ) {
+        requireFunctionName(transaction, "repayReceivable");
+        Long expectedReceivableId = requiredOnchainId(receivable);
+        Long expectedTokenId = receivable.getTokenId();
+        if (expectedTokenId == null || expectedTokenId <= 0) {
+            throw verificationFailed("DB 토큰 ID를 확인할 수 없습니다.");
+        }
+        if (!sameHex(receivable.getMockTokenAddress(), configuredMockKrw)) {
+            throw configurationMismatch(
+                    "DB 결제 토큰 주소가 서버 MockKRW 설정과 일치하지 않습니다."
+            );
+        }
+
+        List<String> arguments = calldataWords(input, REPAY_SELECTOR, 1);
+        requireUint(
+                arguments.get(0),
+                BigInteger.valueOf(expectedReceivableId),
+                "repayReceivable 채권 ID가 DB와 일치하지 않습니다."
+        );
+
+        GiwaRpcProof.Log repaid = singleEvent(
+                logs,
+                configuredContract,
+                REPAID_TOPIC
+        );
+        requireTopicCount(repaid, 4);
+        List<String> repaidData = dataWords(repaid.data(), 2);
+        Long eventReceivableId = positiveLongWord(
+                repaid.topics().get(1),
+                "ReceivableRepaid 채권 ID"
+        );
+        Long eventTokenId = positiveLongWord(
+                repaid.topics().get(2),
+                "ReceivableRepaid 토큰 ID"
+        );
+        if (!Objects.equals(expectedReceivableId, eventReceivableId)) {
+            throw eventMismatch(
+                    "ReceivableRepaid 채권 ID가 DB와 일치하지 않습니다."
+            );
+        }
+        if (!Objects.equals(expectedTokenId, eventTokenId)) {
+            throw eventMismatch(
+                    "ReceivableRepaid 토큰 ID가 DB와 일치하지 않습니다."
+            );
+        }
+        requireSameAddress(
+                decodeAddress(topicWord(repaid, 3)),
+                receivable.getBuyerWalletAddress(),
+                "ReceivableRepaid Buyer가 DB와 일치하지 않습니다."
+        );
+        String recipient = decodeAddress(repaidData.get(0));
+        if (ZERO_ADDRESS.equals(recipient)) {
+            throw eventMismatch(
+                    "ReceivableRepaid 수령자가 0 주소입니다."
+            );
+        }
+        requireUint(
+                repaidData.get(1),
+                decimalInteger(receivable.getFaceValue(), "채권 금액"),
+                "ReceivableRepaid 상환 금액이 DB와 일치하지 않습니다."
+        );
+
+        GiwaRpcProof.Log paymentTransfer = singleEvent(
+                logs,
+                configuredMockKrw,
+                TRANSFER_TOPIC
+        );
+        requireTopicCount(paymentTransfer, 3);
+        List<String> paymentData = dataWords(paymentTransfer.data(), 1);
+        requireSameAddress(
+                decodeAddress(topicWord(paymentTransfer, 1)),
+                transaction.getWalletAddress(),
+                "mKRW Transfer 발신자가 Buyer와 일치하지 않습니다."
+        );
+        requireSameAddress(
+                decodeAddress(topicWord(paymentTransfer, 2)),
+                recipient,
+                "mKRW Transfer 수신자가 ReceivableRepaid 수령자와 일치하지 않습니다."
+        );
+        requireUint(
+                paymentData.get(0),
+                decimalInteger(receivable.getFaceValue(), "채권 금액"),
+                "mKRW Transfer 상환 금액이 DB와 일치하지 않습니다."
+        );
+        return new EventValues(eventReceivableId, eventTokenId);
     }
 
     private void requireCanonicalBlock(
@@ -697,6 +930,16 @@ public class BlockchainTransactionVerifier {
         String rpcUrl = properties.getRpcUrl();
         if (rpcUrl == null || rpcUrl.isBlank()) {
             throw notConfigured("GIWA_RPC_URL");
+        }
+        return address.toLowerCase(Locale.ROOT);
+    }
+
+    private String configuredMockKrwAddress() {
+        String address = properties.getMockKrwAddress();
+        if (address == null
+                || !ADDRESS_PATTERN.matcher(address).matches()
+                || ZERO_ADDRESS.equalsIgnoreCase(address)) {
+            throw notConfigured("GIWA_MOCK_KRW_ADDRESS");
         }
         return address.toLowerCase(Locale.ROOT);
     }

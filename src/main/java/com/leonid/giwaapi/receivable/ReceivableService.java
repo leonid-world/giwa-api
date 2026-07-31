@@ -5,6 +5,7 @@ import com.leonid.giwaapi.auth.UserMapper;
 import com.leonid.giwaapi.common.error.ApiException;
 import com.leonid.giwaapi.company.Company;
 import com.leonid.giwaapi.company.CompanyMapper;
+import com.leonid.giwaapi.transaction.BlockchainRpcProperties;
 import com.leonid.giwaapi.transaction.BlockchainTransactionResponse;
 import com.leonid.giwaapi.transaction.BlockchainTransactionService;
 import com.leonid.giwaapi.wallet.Wallet;
@@ -17,29 +18,39 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
+import java.util.regex.Pattern;
 
 @Service
 public class ReceivableService {
+
+    private static final Pattern ADDRESS_PATTERN =
+            Pattern.compile("^0x[a-fA-F0-9]{40}$");
+    private static final String ZERO_ADDRESS =
+            "0x0000000000000000000000000000000000000000";
 
     private final UserMapper userMapper;
     private final CompanyMapper companyMapper;
     private final WalletMapper walletMapper;
     private final ReceivableMapper receivableMapper;
     private final BlockchainTransactionService transactionService;
+    private final BlockchainRpcProperties blockchainProperties;
 
     public ReceivableService(
             UserMapper userMapper,
             CompanyMapper companyMapper,
             WalletMapper walletMapper,
             ReceivableMapper receivableMapper,
-            BlockchainTransactionService transactionService
+            BlockchainTransactionService transactionService,
+            BlockchainRpcProperties blockchainProperties
     ) {
         this.userMapper = userMapper;
         this.companyMapper = companyMapper;
         this.walletMapper = walletMapper;
         this.receivableMapper = receivableMapper;
         this.transactionService = transactionService;
+        this.blockchainProperties = blockchainProperties;
     }
 
     @Transactional
@@ -87,6 +98,11 @@ public class ReceivableService {
     public List<ReceivableResponse> getAll(String email) {
         User user = findUser(email);
         return receivableMapper.findAllVisibleToCompany(user.companyId());
+    }
+
+    public List<ReceivableResponse> getFundingOpportunities(String email) {
+        User user = findUser(email);
+        return receivableMapper.findAllFundingOpportunities(user.companyId());
     }
 
     public ReceivableResponse getById(String email, Long receivableId) {
@@ -340,6 +356,206 @@ public class ReceivableService {
         );
     }
 
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public ReceivableResponse markFunded(
+            String email,
+            Long receivableId,
+            ReceivableFundedRequest request
+    ) {
+        User user = findUser(email);
+        ReceivableResponse receivable = findReceivable(receivableId);
+        requireThirdPartyFunder(user.companyId(), receivable);
+
+        if (hasFundingMetadata(receivable)) {
+            if (!Objects.equals(user.companyId(), receivable.getFunderCompanyId())) {
+                throw new ApiException(
+                        HttpStatus.FORBIDDEN,
+                        "ONLY_FUNDER",
+                        "채권을 공급한 Funder 회사만 펀딩 동기화를 재시도할 수 있습니다."
+                );
+            }
+            if (hasCompleteFundingMetadata(receivable)
+                    && equalsHex(receivable.getFundingTxHash(), request.txHash())) {
+                return receivable;
+            }
+            throw blockchainMetadataConflict();
+        }
+        if (!"TOKENIZED".equals(receivable.getStatus())) {
+            throw invalidStatus("TOKENIZED", receivable.getStatus());
+        }
+        if (!hasCompleteTokenizationMetadata(receivable)) {
+            throw new ApiException(
+                    HttpStatus.CONFLICT,
+                    "RECEIVABLE_NOT_TOKENIZED_ONCHAIN",
+                    "Seller의 GIWA 채권 토큰화가 먼저 완료되어야 합니다."
+            );
+        }
+
+        Wallet funderWallet = findPrimaryWallet(
+                user.companyId(),
+                "Connect the funder wallet first"
+        );
+        String mockTokenAddress = configuredMockTokenAddress();
+        BlockchainTransactionResponse confirmedTransaction =
+                transactionService.requireConfirmed(
+                        receivableId,
+                        user.companyId(),
+                        "FUND_RECEIVABLE",
+                        funderWallet.walletAddress(),
+                        receivable.getContractAddress(),
+                        request.txHash(),
+                        receivable.getOnchainReceivableId()
+                );
+        if (!Objects.equals(
+                receivable.getTokenId(),
+                confirmedTransaction.getEventTokenId()
+        )) {
+            throw new ApiException(
+                    HttpStatus.CONFLICT,
+                    "BLOCKCHAIN_SYNCHRONIZATION_EVENT_MISMATCH",
+                    "검증된 펀딩 이벤트의 토큰 ID가 DB 채권과 일치하지 않습니다."
+            );
+        }
+        String txHash = confirmedTransaction.getTxHash();
+        if (receivableMapper.countTransactionHashUsage(txHash) > 0) {
+            throw blockchainMetadataConflict();
+        }
+
+        int updated;
+        try {
+            updated = receivableMapper.markFunded(
+                    receivableId,
+                    user.companyId(),
+                    user.userId(),
+                    funderWallet.walletAddress(),
+                    mockTokenAddress,
+                    txHash
+            );
+        } catch (DataIntegrityViolationException exception) {
+            throw blockchainMetadataConflict();
+        }
+        if (updated == 1) {
+            receivableMapper.insertFundedHistory(
+                    receivableId,
+                    user.companyId(),
+                    funderWallet.walletAddress(),
+                    txHash
+            );
+            return findReceivable(receivableId);
+        }
+
+        ReceivableResponse latest = findReceivable(receivableId);
+        if (sameFundingMetadata(
+                latest,
+                user.companyId(),
+                funderWallet.walletAddress(),
+                mockTokenAddress,
+                txHash
+        )) {
+            return latest;
+        }
+        if (hasFundingMetadata(latest)) {
+            throw blockchainMetadataConflict();
+        }
+        throw new ApiException(
+                HttpStatus.CONFLICT,
+                "RECEIVABLE_STATE_CONFLICT",
+                "채권 상태가 다른 요청에 의해 변경되었습니다. 새로고침 후 다시 확인해 주세요."
+        );
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public ReceivableResponse markRepaid(
+            String email,
+            Long receivableId,
+            ReceivableRepaidRequest request
+    ) {
+        User user = findUser(email);
+        ReceivableResponse receivable = findReceivable(receivableId);
+        requireCompany(
+                user.companyId(),
+                receivable.getBuyerCompanyId(),
+                "ONLY_BUYER",
+                "Buyer 회사만 매출채권 상환을 동기화할 수 있습니다."
+        );
+
+        if (receivable.getRepayTxHash() != null) {
+            if (equalsHex(receivable.getRepayTxHash(), request.txHash())) {
+                return receivable;
+            }
+            throw blockchainMetadataConflict();
+        }
+        if (!"FUNDED".equals(receivable.getStatus())) {
+            throw invalidStatus("FUNDED", receivable.getStatus());
+        }
+        if (!hasCompleteFundedMetadata(receivable)) {
+            throw new ApiException(
+                    HttpStatus.CONFLICT,
+                    "RECEIVABLE_NOT_FUNDED_ONCHAIN",
+                    "Funder의 GIWA 채권 펀딩이 먼저 완료되어야 합니다."
+            );
+        }
+
+        BlockchainTransactionResponse confirmedTransaction =
+                transactionService.requireConfirmed(
+                        receivableId,
+                        user.companyId(),
+                        "REPAY_RECEIVABLE",
+                        receivable.getBuyerWalletAddress(),
+                        receivable.getContractAddress(),
+                        request.txHash(),
+                        receivable.getOnchainReceivableId()
+                );
+        if (!Objects.equals(
+                receivable.getTokenId(),
+                confirmedTransaction.getEventTokenId()
+        )) {
+            throw new ApiException(
+                    HttpStatus.CONFLICT,
+                    "BLOCKCHAIN_SYNCHRONIZATION_EVENT_MISMATCH",
+                    "검증된 상환 이벤트의 토큰 ID가 DB 채권과 일치하지 않습니다."
+            );
+        }
+        String txHash = confirmedTransaction.getTxHash();
+        if (receivableMapper.countTransactionHashUsage(txHash) > 0) {
+            throw blockchainMetadataConflict();
+        }
+
+        int updated;
+        try {
+            updated = receivableMapper.markRepaid(
+                    receivableId,
+                    user.companyId(),
+                    user.userId(),
+                    txHash
+            );
+        } catch (DataIntegrityViolationException exception) {
+            throw blockchainMetadataConflict();
+        }
+        if (updated == 1) {
+            receivableMapper.insertRepaidHistory(
+                    receivableId,
+                    user.companyId(),
+                    receivable.getBuyerWalletAddress(),
+                    txHash
+            );
+            return findReceivable(receivableId);
+        }
+
+        ReceivableResponse latest = findReceivable(receivableId);
+        if (equalsHex(latest.getRepayTxHash(), txHash)) {
+            return latest;
+        }
+        if (latest.getRepayTxHash() != null) {
+            throw blockchainMetadataConflict();
+        }
+        throw new ApiException(
+                HttpStatus.CONFLICT,
+                "RECEIVABLE_STATE_CONFLICT",
+                "채권 상태가 다른 요청에 의해 변경되었습니다. 새로고침 후 다시 확인해 주세요."
+        );
+    }
+
     private User findUser(String email) {
         return userMapper.findByEmail(email)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED));
@@ -399,6 +615,31 @@ public class ReceivableService {
                 || receivable.getTokenizeTxHash() != null;
     }
 
+    private boolean hasCompleteTokenizationMetadata(ReceivableResponse receivable) {
+        return hasCompleteVerifiedChainMetadata(receivable)
+                && receivable.getTokenId() != null
+                && receivable.getTokenizeTxHash() != null;
+    }
+
+    private boolean hasFundingMetadata(ReceivableResponse receivable) {
+        return receivable.getFunderCompanyId() != null
+                || receivable.getFunderWalletAddress() != null
+                || receivable.getMockTokenAddress() != null
+                || receivable.getFundingTxHash() != null;
+    }
+
+    private boolean hasCompleteFundingMetadata(ReceivableResponse receivable) {
+        return receivable.getFunderCompanyId() != null
+                && receivable.getFunderWalletAddress() != null
+                && receivable.getMockTokenAddress() != null
+                && receivable.getFundingTxHash() != null;
+    }
+
+    private boolean hasCompleteFundedMetadata(ReceivableResponse receivable) {
+        return hasCompleteTokenizationMetadata(receivable)
+                && hasCompleteFundingMetadata(receivable);
+    }
+
     private boolean sameChainMetadata(
             ReceivableResponse receivable,
             Long onchainReceivableId,
@@ -420,6 +661,47 @@ public class ReceivableService {
     ) {
         return Objects.equals(receivable.getTokenId(), tokenId)
                 && equalsHex(receivable.getTokenizeTxHash(), txHash);
+    }
+
+    private boolean sameFundingMetadata(
+            ReceivableResponse receivable,
+            Long companyId,
+            String walletAddress,
+            String mockTokenAddress,
+            String txHash
+    ) {
+        return Objects.equals(receivable.getFunderCompanyId(), companyId)
+                && equalsHex(receivable.getFunderWalletAddress(), walletAddress)
+                && equalsHex(receivable.getMockTokenAddress(), mockTokenAddress)
+                && equalsHex(receivable.getFundingTxHash(), txHash);
+    }
+
+    private void requireThirdPartyFunder(
+            Long companyId,
+            ReceivableResponse receivable
+    ) {
+        if (Objects.equals(companyId, receivable.getSellerCompanyId())
+                || Objects.equals(companyId, receivable.getBuyerCompanyId())) {
+            throw new ApiException(
+                    HttpStatus.FORBIDDEN,
+                    "RELATED_PARTY_CANNOT_FUND",
+                    "Seller와 Buyer 회사는 해당 채권에 자금을 공급할 수 없습니다."
+            );
+        }
+    }
+
+    private String configuredMockTokenAddress() {
+        String value = blockchainProperties.getMockKrwAddress();
+        if (value == null
+                || !ADDRESS_PATTERN.matcher(value).matches()
+                || ZERO_ADDRESS.equalsIgnoreCase(value)) {
+            throw new ApiException(
+                    HttpStatus.SERVICE_UNAVAILABLE,
+                    "BLOCKCHAIN_RPC_NOT_CONFIGURED",
+                    "GIWA_MOCK_KRW_ADDRESS 환경변수를 설정해 주세요."
+            );
+        }
+        return value.toLowerCase(Locale.ROOT);
     }
 
     private boolean isZeroAddress(String address) {

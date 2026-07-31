@@ -13,6 +13,7 @@ public class ReceivableResponse {
     private Long buyerCompanyId;
     private String buyerCompanyName;
     private Long funderCompanyId;
+    private String funderCompanyName;
     private String sellerWalletAddress;
     private String buyerWalletAddress;
     private String funderWalletAddress;
@@ -55,6 +56,8 @@ public class ReceivableResponse {
     public void setBuyerCompanyName(String buyerCompanyName) { this.buyerCompanyName = buyerCompanyName; }
     public Long getFunderCompanyId() { return funderCompanyId; }
     public void setFunderCompanyId(Long funderCompanyId) { this.funderCompanyId = funderCompanyId; }
+    public String getFunderCompanyName() { return funderCompanyName; }
+    public void setFunderCompanyName(String funderCompanyName) { this.funderCompanyName = funderCompanyName; }
     public String getSellerWalletAddress() { return sellerWalletAddress; }
     public void setSellerWalletAddress(String sellerWalletAddress) { this.sellerWalletAddress = sellerWalletAddress; }
     public String getBuyerWalletAddress() { return buyerWalletAddress; }
